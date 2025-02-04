@@ -1,82 +1,74 @@
-# NxMfe
+nx-testing % nx g @nx/react:application apps/host
 
-<a alt="Nx logo" href="https://nx.dev" target="_blank" rel="noreferrer"><img src="https://raw.githubusercontent.com/nrwl/nx/master/images/nx-logo.png" width="45"></a>
+nx-testing
 
-✨ Your new, shiny [Nx workspace](https://nx.dev) is almost ready ✨.
+nx-mfe
 
-[Learn more about this workspace setup and its capabilities](https://nx.dev/getting-started/tutorials/react-monorepo-tutorial?utm_source=nx_project&amp;utm_medium=readme&amp;utm_campaign=nx_projects) or run `npx nx graph` to visually explore what was created. Now, let's get you up to speed!
+Create a Custom Nx Generator to generate a rslib with Jest
 
-## Finish your CI setup
+- https://www.youtube.com/watch?v=myqfGDWC2go&t=40s
+- https://chatgpt.com/share/679d178f-2710-800c-a178-5322144436a7
+- https://chatgpt.com/share/679d17ec-b2c0-800c-a2cd-871d090d0b5d (see the last question)
 
-[Click here to finish setting up your workspace!](https://cloud.nx.app/connect/gHMSzRrhaw)
+pnpm nx generate @nx-mfe/rslib-tem:rslib testing
 
+Init the package
 
-## Run tasks
+Step 1: Run a react lib generator
+pnpm nx g @nx/react:lib packages/rslib-none
 
-To run the dev server for your app, use:
+Step 2: Add package and rslib.config.js files
 
-```sh
-npx nx serve host
-```
+Step 3: Test a build to make sure it works
 
-To create a production bundle:
+- You will need to:
+  - Create a "pnpm-workspace.yaml” with the folders that can be shared with the root package/node module
+  - Add a “workspaces” array in the root package.json that mirrors the folders the “pnpm-workspace.yaml” file
+  -
 
-```sh
-npx nx build host
-```
+pnpm nx generate @nx-mfe/rslib-tem:rslib testing
 
-To see all available targets to run for a project, run:
+Questions:
 
-```sh
-npx nx show project host
-```
+- Can a package, component, etc be nested
+- The ones that CAN’T be nested so have code to fail if the name is nested
 
-These targets are either [inferred automatically](https://nx.dev/concepts/inferred-tasks?utm_source=nx_project&utm_medium=readme&utm_campaign=nx_projects) or defined in the `project.json` or `package.json` files.
+Test Cases:
 
-[More about running tasks in the docs &raquo;](https://nx.dev/features/run-tasks?utm_source=nx_project&utm_medium=readme&utm_campaign=nx_projects)
+- Make sure the project.json is created
+- The RsLib build is working correctly
+- Allow the option to use storybook in the project
+- Allow to name the project
+- Dynamically add the scope of the root project in the project name
+- The path in the tsconfig file is added based on the project created
+- I can use the packages in a MFE with no issue
+- I can install a package in the package with no issues
 
-## Add new projects
+Step One - Create the plugin:
+pnpm nx g @nx/plugin:plugin tools/rslib
 
-While you could add new projects to your workspace manually, you might want to leverage [Nx plugins](https://nx.dev/concepts/nx-plugins?utm_source=nx_project&utm_medium=readme&utm_campaign=nx_projects) and their [code generation](https://nx.dev/features/generate-code?utm_source=nx_project&utm_medium=readme&utm_campaign=nx_projects) feature.
+Step Two - Create the generator for the plugin:
+pnpm nx generate @nx/plugin:generator tools/rslib-tem/src/generators/rslib
 
-Use the plugin's generator to create new projects.
+Step Three - Customize the generator:
+There are two ways to modify the generator.
 
-To generate a new application, use:
+1. Duplicating files after the generator command is called
+2. Calling an nx command after the generator command is called
 
-```sh
-npx nx g @nx/react:app demo
-```
+FYI: You can do both things in one generator if needed
 
-To generate a new library, use:
+Test
 
-```sh
-npx nx g @nx/react:lib mylib
-```
+- Create a util in the “rslib-none” folder
+- The util will use a node_module from the root package
+- Make sure it works in the MFE code
+- Build the code than using the dist make sure the code works in the MRE code
 
-You can use `npx nx list` to get a list of installed plugins. Then, run `npx nx list <plugin-name>` to learn about more specific capabilities of a particular plugin. Alternatively, [install Nx Console](https://nx.dev/getting-started/editor-setup?utm_source=nx_project&utm_medium=readme&utm_campaign=nx_projects) to browse plugins and generators in your IDE.
+Links
 
-[Learn more about Nx plugins &raquo;](https://nx.dev/concepts/nx-plugins?utm_source=nx_project&utm_medium=readme&utm_campaign=nx_projects) | [Browse the plugin registry &raquo;](https://nx.dev/plugin-registry?utm_source=nx_project&utm_medium=readme&utm_campaign=nx_projects)
+Nx Console
 
+https://marketplace.visualstudio.com/items?itemName=nrwl.angular-console
 
-[Learn more about Nx on CI](https://nx.dev/ci/intro/ci-with-nx#ready-get-started-with-your-provider?utm_source=nx_project&utm_medium=readme&utm_campaign=nx_projects)
-
-## Install Nx Console
-
-Nx Console is an editor extension that enriches your developer experience. It lets you run tasks, generate code, and improves code autocompletion in your IDE. It is available for VSCode and IntelliJ.
-
-[Install Nx Console &raquo;](https://nx.dev/getting-started/editor-setup?utm_source=nx_project&utm_medium=readme&utm_campaign=nx_projects)
-
-## Useful links
-
-Learn more:
-
-- [Learn more about this workspace setup](https://nx.dev/getting-started/tutorials/react-monorepo-tutorial?utm_source=nx_project&amp;utm_medium=readme&amp;utm_campaign=nx_projects)
-- [Learn about Nx on CI](https://nx.dev/ci/intro/ci-with-nx?utm_source=nx_project&utm_medium=readme&utm_campaign=nx_projects)
-- [Releasing Packages with Nx release](https://nx.dev/features/manage-releases?utm_source=nx_project&utm_medium=readme&utm_campaign=nx_projects)
-- [What are Nx plugins?](https://nx.dev/concepts/nx-plugins?utm_source=nx_project&utm_medium=readme&utm_campaign=nx_projects)
-
-And join the Nx community:
-- [Discord](https://go.nx.dev/community)
-- [Follow us on X](https://twitter.com/nxdevtools) or [LinkedIn](https://www.linkedin.com/company/nrwl)
-- [Our Youtube channel](https://www.youtube.com/@nxdevtools)
-- [Our blog](https://nx.dev/blog?utm_source=nx_project&utm_medium=readme&utm_campaign=nx_projects)
+https://plugins.jetbrains.com/plugin/21060-nx-console
