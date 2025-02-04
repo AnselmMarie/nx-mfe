@@ -1,0 +1,41 @@
+{
+  "name": "rslib-tem",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "sourceRoot": "tools/rslib-tem/src",
+  "projectType": "library",
+  "tags": [],
+  "targets": {
+    "build": {
+      "executor": "@nx/js:tsc",
+      "outputs": ["{options.outputPath}"],
+      "options": {
+        "outputPath": "dist/tools/rslib-tem",
+        "main": "tools/rslib-tem/src/index.ts",
+        "tsConfig": "tools/rslib-tem/tsconfig.lib.json",
+        "assets": [
+          "tools/rslib-tem/*.md",
+          {
+            "input": "./tools/rslib-tem/src",
+            "glob": "**/!(*.ts)",
+            "output": "./src"
+          },
+          {
+            "input": "./tools/rslib-tem/src",
+            "glob": "**/*.d.ts",
+            "output": "./src"
+          },
+          {
+            "input": "./tools/rslib-tem",
+            "glob": "generators.json",
+            "output": "."
+          },
+          {
+            "input": "./tools/rslib-tem",
+            "glob": "executors.json",
+            "output": "."
+          }
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "generators": {
+    "rslib": {
+      "factory": "./src/generators/rslib",
+      "schema": "./src/generators/schema.json",
+      "description": "rslib generator"
+    }
+  }
+}

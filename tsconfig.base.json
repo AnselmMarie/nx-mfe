@@ -14,7 +14,13 @@
     "skipLibCheck": true,
     "skipDefaultLibCheck": true,
     "baseUrl": ".",
-    "paths": {}
+    "paths": {
+      "@nx-mfe/rslib-none": ["packages/rslib-none/src/index.ts"],
+      "@nx-mfe/rslib-tem": ["tools/rslib-tem/src/index.ts"],
+      "@nx-mfe/testing-one": ["packages/testing-one/src/index.ts"],
+      "footer/Module": ["apps/footer/src/remote-entry.ts"],
+      "header/Module": ["apps/header/src/remote-entry.ts"]
+    }
   },
   "exclude": ["node_modules", "tmp"]
 }
