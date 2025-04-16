@@ -72,3 +72,50 @@ Nx Console
 https://marketplace.visualstudio.com/items?itemName=nrwl.angular-console
 
 https://plugins.jetbrains.com/plugin/21060-nx-console
+
+
+
+
+// src/utils/dispatchTouchEvent.ts
+export function dispatchTouchEvent(
+  node: Element,
+  type: 'start' | 'move' | 'end',
+  points: Array<{ x: number; y: number; identifier?: number }>
+) {
+  // Build Touch objects
+  const touches = points.map(({ x, y, identifier = 0 }, idx) =>
+    // We just need the minimal Touch shape for your handler
+    Object.assign(
+      { identifier, target: node, clientX: x, clientY: y },
+      {}
+    ) as Touch
+  );
+
+  // Create a “bare‐bones” Event and then graft on touches
+  const event = new Event('touch' + type, {
+    bubbles: true,
+    cancelable: true,
+  }) as TouchEvent;
+
+  Object.defineProperties(event, {
+    touches: { value: touches, configurable: true },
+    targetTouches: { value: touches, configurable: true },
+    changedTouches: { value: touches, configurable: true },
+  });
+
+  node.dispatchEvent(event);
+}
+
+import { render, screen } from '@testing-library/react';
+import { dispatchTouchEvent } from '../src/utils/dispatchTouchEvent';
+import MyComponent from '../src/MyComponent';
+
+test('handles touchstart correctly', () => {
+  render(<MyComponent />);
+  const area = screen.getByTestId('touch-area');
+
+  dispatchTouchEvent(area, 'start', [{ x: 42, y: 99 }]);
+
+  // now your onTouchStart handler sees e.touches[0]…
+  expect(/* … */).toBe(/* … */);
+});
