@@ -263,3 +263,63 @@ Test Cases:
 - I can install a package in the package with no issues
 
 FYI: You can do both things in one generator if needed
+
+
+-------------
+
+TanStack Form
+
+Ex:
+http://stackblitz.com/github/TanStack/form/tree/main/examples/react/large-form 
+
+Notes:
+https://tanstack.com/form/latest/docs/framework/react/guides/form-composition#a-note-on-performance 
+
+
+
+Positives
+- React and React Native
+- Typing is inferred — no need to type it out
+    - Extreme type safety 
+- Can be easily written with Zod
+- No dependencies
+- Flexibility in Validation
+    - Validate per form, field, or subset of fields
+- Async validation
+    - + you can have async for onBlur, onChange, etc per field
+    - + By default it uses AbortSignal cancellation 
+- Has a hook version so it can be easily adding to design system
+- Has React Server Action functionality
+- Debounce is built in for validation
+- It has the same amount of issues / pull request
+
+
+Negatives
+- V1 just came out so it’s not battle tested by the public
+
+
+
+React Query
+
+Ex:
+https://medium.com/@abdurshd/a-step-by-step-guide-to-building-reusable-components-with-react-hook-form-70f5e77c9037 
+
+
+Positives
+- React and React Native
+- Can be easily written with Zod
+- No dependencies
+- Async validation
+    - Only onBlur for field 
+    - + could use onWatch for custom debounce/async validation on change
+- Has a hook version so it can be easily adding to design system
+- Debounce is not built in for validation but can be used by creating custom logic with watch
+- It’s been battle tested by the public for years
+- It has the same amount of issues / pull request
+
+
+Negatives
+- Typing needs to be written
+
+
+
