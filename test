@@ -1,0 +1,411 @@
+import { vi, expect, describe, it, beforeEach } from 'vitest'
+
+// Mock the global scope and its properties
+const clients = {
+  claim: vi.fn(() => Promise.resolve()),
+  matchAll: vi.fn(() => Promise.resolve([])),
+  get: vi.fn(() => Promise.resolve(null)),
+}
+const registration = {
+  unregister: vi.fn(() => Promise.resolve(true)),
+}
+const crypto = {
+  randomUUID: vi.fn(() => 'mock-uuid'),
+}
+const self = {
+  addEventListener: vi.fn(),
+  skipWaiting: vi.fn(),
+  clients,
+  registration,
+} as unknown as ServiceWorkerGlobalScope
+
+// Mock the fetch API
+const mockFetch = vi.fn(() => Promise.resolve(new Response('passthrough')))
+global.fetch = mockFetch
+
+// Mock the MessageChannel
+const mockPort1Onmessage = vi.fn()
+const mockPostMessage = vi.fn()
+const mockMessageChannel = vi.fn(() => ({
+  port1: { onmessage: mockPort1Onmessage },
+  port2: { postMessage: mockPostMessage },
+}))
+global.MessageChannel = mockMessageChannel as unknown as {
+  new (): MessageChannel
+}
+
+// Import the module under test after mocking
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const serviceWorker = require('./your-service-worker-file') // Replace with the actual path
+
+describe('Service Worker Tests', () => {
+  let messageHandler: (event: ExtendableMessageEvent) => Promise<void>
+  let fetchHandler: (event: FetchEvent) => void
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    // Find the message and fetch event listeners
+    self.addEventListener.mock.calls.forEach((call) => {
+      const type = call[0]
+      const listener = call[1]
+      if (type === 'message') {
+        messageHandler = listener as (event: ExtendableMessageEvent) => Promise<void>
+      } else if (type === 'fetch') {
+        fetchHandler = listener as (event: FetchEvent) => void
+      }
+    })
+    clients.matchAll.mockResolvedValue([])
+    clients.get.mockResolvedValue({
+      id: 'client-1',
+      frameType: 'window',
+      postMessage: mockPostMessage,
+      visibilityState: 'visible',
+    } as unknown as Client)
+  })
+
+  it('should skip waiting on install', () => {
+    const installHandler = self.addEventListener.mock.calls.find((call) => call[0] === 'install')?.[1]
+    installHandler()
+    expect(self.skipWaiting).toHaveBeenCalled()
+  })
+
+  it('should claim clients on activate', async () => {
+    const activateHandler = self.addEventListener.mock.calls.find((call) => call[0] === 'activate')?.[1]
+    const waitUntilMock = vi.fn()
+    activateHandler({ waitUntil: waitUntilMock } as ExtendableEvent)
+    expect(waitUntilMock).toHaveBeenCalled()
+    await waitUntilMock.mock.calls[0][0]
+    expect(clients.claim).toHaveBeenCalled()
+  })
+
+  describe('message event listener', () => {
+    it('should handle KEEPALIVE_REQUEST', async () => {
+      const mockClient = { id: 'client-1', postMessage: mockPostMessage } as unknown as Client
+      clients.get.mockResolvedValue(mockClient)
+      await messageHandler({
+        source: { id: 'client-1' } as MessagePort,
+        data: 'KEEPALIVE_REQUEST',
+      } as ExtendableMessageEvent)
+      expect(mockPostMessage).toHaveBeenCalledWith({ type: 'KEEPALIVE_RESPONSE' }, [
+        { onmessage: mockPort1Onmessage },
+      ])
+    })
+
+    it('should handle INTEGRITY_CHECK_REQUEST', async () => {
+      const mockClient = { id: 'client-1', postMessage: mockPostMessage } as unknown as Client
+      clients.get.mockResolvedValue(mockClient)
+      await messageHandler({
+        source: { id: 'client-1' } as MessagePort,
+        data: 'INTEGRITY_CHECK_REQUEST',
+      } as ExtendableMessageEvent)
+      expect(mockPostMessage).toHaveBeenCalledWith(
+        {
+          type: 'INTEGRITY_CHECK_RESPONSE',
+          payload: { packageVersion: '2.6.4', checksum: 'ca7800994cc8bfb5eb961e037c877074' },
+        },
+        [{ onmessage: mockPort1Onmessage }],
+      )
+    })
+
+    it('should handle MOCK_ACTIVATE', async () => {
+      const mockClient = { id: 'client-1', frameType: 'window', postMessage: mockPostMessage } as unknown as Client
+      clients.get.mockResolvedValue(mockClient)
+      await messageHandler({
+        source: { id: 'client-1' } as MessagePort,
+        data: 'MOCK_ACTIVATE',
+      } as ExtendableMessageEvent)
+      expect(mockPostMessage).toHaveBeenCalledWith(
+        {
+          type: 'MOCKING_ENABLED',
+          payload: { client: { id: 'client-1', frameType: 'window' } },
+        },
+        [{ onmessage: mockPort1Onmessage }],
+      )
+    })
+
+    it('should handle MOCK_DEACTIVATE', async () => {
+      const mockClient = { id: 'client-1' } as unknown as Client
+      clients.get.mockResolvedValue(mockClient)
+      await messageHandler({
+        source: { id: 'client-1' } as MessagePort,
+        data: 'MOCK_ACTIVATE',
+      } as ExtendableMessageEvent)
+      await messageHandler({
+        source: { id: 'client-1' } as MessagePort,
+        data: 'MOCK_DEACTIVATE',
+      } as ExtendableMessageEvent)
+      // No expectation on postMessage for deactivate
+    })
+
+    it('should handle CLIENT_CLOSED and unregister when no remaining clients', async () => {
+      const mockClient = { id: 'client-1' } as unknown as Client
+      clients.get.mockResolvedValue(mockClient)
+      clients.matchAll.mockResolvedValue([mockClient] as unknown as WindowClient[])
+      await messageHandler({
+        source: { id: 'client-1' } as MessagePort,
+        data: 'MOCK_ACTIVATE',
+      } as ExtendableMessageEvent)
+      await messageHandler({
+        source: { id: 'client-1' } as MessagePort,
+        data: 'CLIENT_CLOSED',
+      } as ExtendableMessageEvent)
+      expect(registration.unregister).toHaveBeenCalled()
+    })
+
+    it('should handle CLIENT_CLOSED and not unregister when there are remaining clients', async () => {
+      const mockClient1 = { id: 'client-1' } as unknown as Client
+      const mockClient2 = { id: 'client-2' } as unknown as Client
+      clients.get.mockResolvedValue(mockClient1)
+      clients.matchAll.mockResolvedValue([mockClient1, mockClient2] as unknown as WindowClient[])
+      await messageHandler({
+        source: { id: 'client-1' } as MessagePort,
+        data: 'MOCK_ACTIVATE',
+      } as ExtendableMessageEvent)
+      await messageHandler({
+        source: { id: 'client-1' } as MessagePort,
+        data: 'CLIENT_CLOSED',
+      } as ExtendableMessageEvent)
+      expect(registration.unregister).not.toHaveBeenCalled()
+    })
+
+    it('should return early if clientId or clients is not available', async () => {
+      await messageHandler({ source: null, data: 'KEEPALIVE_REQUEST' } as ExtendableMessageEvent)
+      expect(mockPostMessage).not.toHaveBeenCalled()
+      const originalSelfClients = self.clients
+      // @ts-expect-error intentionally setting to undefined for test
+      self.clients = undefined
+      await messageHandler({ source: { id: 'client-1' } as MessagePort, data: 'KEEPALIVE_REQUEST' } as ExtendableMessageEvent)
+      expect(mockPostMessage).not.toHaveBeenCalled()
+      self.clients = originalSelfClients
+    })
+
+    it('should return early if client is not found', async () => {
+      clients.get.mockResolvedValue(null)
+      await messageHandler({
+        source: { id: 'non-existent-client' } as MessagePort,
+        data: 'KEEPALIVE_REQUEST',
+      } as ExtendableMessageEvent)
+      expect(mockPostMessage).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('fetch event listener', () => {
+    let mockRespondWith: (response: Promise<Response>) => void
+
+    beforeEach(() => {
+      mockRespondWith = vi.fn()
+    })
+
+    it('should bypass navigation requests', () => {
+      fetchHandler({ request: { mode: 'navigate' } } as FetchEvent)
+      expect(mockRespondWith).not.toHaveBeenCalled()
+    })
+
+    it('should bypass "only-if-cached" requests from different origin', () => {
+      fetchHandler({
+        request: { cache: 'only-if-cached', mode: 'no-cors' },
+        respondWith: mockRespondWith,
+      } as FetchEvent)
+      expect(mockRespondWith).not.toHaveBeenCalled()
+    })
+
+    it('should bypass all requests when no active clients', () => {
+      // Initially no active clients
+      fetchHandler({
+        request: { url: '/api/data' },
+        respondWith: mockRespondWith,
+      } as FetchEvent)
+      expect(mockRespondWith).not.toHaveBeenCalled()
+    })
+
+    it('should call handleRequest for other requests', () => {
+      // Activate a client
+      messageHandler({
+        source: { id: 'client-1' } as MessagePort,
+        data: 'MOCK_ACTIVATE',
+      } as ExtendableMessageEvent)
+
+      const mockEvent = {
+        request: { url: '/api/data', mode: 'same-origin' },
+        respondWith: mockRespondWith,
+      } as FetchEvent
+      fetchHandler(mockEvent)
+      expect(mockRespondWith).toHaveBeenCalled()
+    })
+  })
+
+  describe('handleRequest function', () => {
+    let mockEvent: FetchEvent
+    let mockResponseClone: Response
+
+    beforeEach(() => {
+      mockResponseClone = new Response('mocked response', {
+        status: 200,
+        statusText: 'OK',
+        headers: new Headers({ 'Content-Type': 'application/json' }),
+      })
+      const mockGetResponse = vi.fn(() => Promise.resolve(mockResponseClone))
+      // @ts-expect-error cannot assign to read-only property
+      global.getResponse = mockGetResponse
+
+      mockEvent = {
+        clientId: 'client-1',
+        request: new Request('/api/data'),
+        respondWith: vi.fn(),
+      } as unknown as FetchEvent
+
+      clients.get.mockResolvedValue({
+        id: 'client-1',
+        frameType: 'window',
+        postMessage: mockPostMessage,
+      } as unknown as Client)
+
+      // Activate a client
+      messageHandler({
+        source: { id: 'client-1' } as MessagePort,
+        data: 'MOCK_ACTIVATE',
+      } as ExtendableMessageEvent)
+    })
+
+    it('should call getResponse', async () => {
+      await (serviceWorker as any).handleRequest(mockEvent, 'mock-uuid')
+      expect(global.getResponse).toHaveBeenCalledWith(mockEvent, {
+        id: 'client-1',
+        frameType: 'window',
+        postMessage: mockPostMessage,
+      }, 'mock-uuid')
+    })
+
+    it('should send the response to the client', async () => {
+      await (serviceWorker as any).handleRequest(mockEvent, 'mock-uuid')
+      expect(mockPostMessage).toHaveBeenCalled()
+      const message = mockPostMessage.mock.calls[0][0]
+      expect(message.type).toBe('RESPONSE')
+      expect(message.payload.requestId).toBe('mock-uuid')
+      expect(message.payload.isMockedResponse).toBe(false)
+      expect(message.payload.status).toBe(200)
+      expect(message.payload.statusText).toBe('OK')
+      expect(message.payload.headers).toEqual({ 'content-type': 'application/json' })
+    })
+
+    it('should not send response to client if client is not active', async () => {
+      // Deactivate the client
+      messageHandler({
+        source: { id: 'client-1' } as MessagePort,
+        data: 'MOCK_DEACTIVATE',
+      } as ExtendableMessageEvent)
+      await (serviceWorker as any).handleRequest(mockEvent, 'mock-uuid')
+      expect(mockPostMessage).not.toHaveBeenCalled()
+    })
+
+    it('should respond with the response from getResponse', async () => {
+      await (serviceWorker as any).handleRequest(mockEvent, 'mock-uuid')
+      expect(mockEvent.respondWith).toHaveBeenCalledWith(Promise.resolve(mockResponseClone))
+    })
+  })
+
+  describe('resolveMainClient function', () => {
+    const mockEvent = { clientId: 'client-1' } as FetchEvent
+    const mockClient = { id: 'client-1', frameType: 'window', visibilityState: 'visible' } as unknown as WindowClient
+
+    beforeEach(() => {
+      clients.get.mockResolvedValue(mockClient)
+      clients.matchAll.mockResolvedValue([mockClient])
+      // Activate a client
+      messageHandler({
+        source: { id: 'client-1' } as MessagePort,
+        data: 'MOCK_ACTIVATE',
+      } as ExtendableMessageEvent)
+    })
+
+    it('should return the client if it is active', async () => {
+      const client = await (serviceWorker as any).resolveMainClient(mockEvent)
+      expect(client).toEqual(mockClient)
+    })
+
+    it('should return the client if it is top-level and not active', async () => {
+      // Deactivate the client
+      messageHandler({
+        source: { id: 'client-1' } as MessagePort,
+        data: 'MOCK_DEACTIVATE',
+      } as ExtendableMessageEvent)
+      const client = await (serviceWorker as any).resolveMainClient({
+        clientId: 'client-1',
+      } as FetchEvent)
+      expect(client).toEqual(mockClient)
+    })
+
+    it('should return the visible active client from matchAll', async () => {
+      const mockInactiveClient = {
+        id: 'client-2',
+        frameType: 'window',
+        visibilityState: 'hidden',
+      } as unknown as WindowClient
+      clients.matchAll.mockResolvedValue([mockInactiveClient, mockClient])
+      const client = await (serviceWorker as any).resolveMainClient({
+        clientId: 'client-2',
+      } as FetchEvent)
+      expect(client).toEqual(mockClient)
+    })
+
+    it('should return undefined if no visible active client is found', async () => {
+      // Deactivate the client
+      messageHandler({
+        source: { id: 'client-1' } as MessagePort,
+        data: 'MOCK_DEACTIVATE',
+      } as ExtendableMessageEvent)
+      clients.matchAll.mockResolvedValue([])
+      const client = await (serviceWorker as any).resolveMainClient(mockEvent)
+      expect(client).toBeUndefined()
+    })
+  })
+
+  describe('getResponse function', () => {
+    let mockEvent: FetchEvent
+    let mockClient: Client
+
+    beforeEach(() => {
+      mockEvent = {
+        request: new Request('/api/data'),
+        respondWith: vi.fn(),
+      } as unknown as FetchEvent
+      mockClient = { id: 'client-1', postMessage: mockPostMessage } as unknown as Client
+
+      clients.get.mockResolvedValue(mockClient)
+
+      // Activate a client
+      messageHandler({
+        source: { id: 'client-1' } as MessagePort,
+        data: 'MOCK_ACTIVATE',
+      } as ExtendableMessageEvent)
+    })
+
+    it('should call passthrough if no client', async () => {
+      clients.get.mockResolvedValue(null)
+      await (serviceWorker as any).getResponse(mockEvent, null, 'mock-uuid')
+      expect(mockFetch).toHaveBeenCalledWith(new Request('/api/data'), { headers: new Headers() })
+    })
+
+    it('should call passthrough if client is not active', async () => {
+      // Deactivate the client
+      messageHandler({
+        source: { id: 'client-1' } as MessagePort,
+        data: 'MOCK_DEACTIVATE',
+      } as ExtendableMessageEvent)
+      await (serviceWorker as any).getResponse(mockEvent, mockClient, 'mock-uuid')
+      expect(mockFetch).toHaveBeenCalledWith(new Request('/api/data'), { headers: new Headers() })
+    })
+
+    it('should send a REQUEST message to the client', async () => {
+      await (serviceWorker as any).getResponse(mockEvent, mockClient, 'mock-uuid')
+      expect(mockPostMessage).toHaveBeenCalledWith(
+        {
+          type: 'REQUEST',
+          payload: {
+            id: 'mock-uuid',
+            url: '/api/data',
+            mode: 'same-origin',
+            method: 'GET',
+            headers: {},
+            cache: 'default',
+            credentials: 'same-
