@@ -1,411 +1,360 @@
-import { vi, expect, describe, it, beforeEach } from 'vitest'
+import { renderHook, act } from '@testing-library/react-hooks';
+import { setupServer } from 'msw/node';
+import { rest } from 'msw';
+import {
+  mockExtendableMessageEvent,
+  mockFetchEvent,
+  mockClient,
+  mockWindowClient,
+  mockServiceWorkerRegistration,
+  mockCrypto,
+} from './test-utils'; // Assuming you create a test-utils.ts file
 
-// Mock the global scope and its properties
-const clients = {
-  claim: vi.fn(() => Promise.resolve()),
-  matchAll: vi.fn(() => Promise.resolve([])),
-  get: vi.fn(() => Promise.resolve(null)),
-}
-const registration = {
-  unregister: vi.fn(() => Promise.resolve(true)),
-}
-const crypto = {
-  randomUUID: vi.fn(() => 'mock-uuid'),
-}
-const self = {
-  addEventListener: vi.fn(),
-  skipWaiting: vi.fn(),
-  clients,
-  registration,
-} as unknown as ServiceWorkerGlobalScope
+// Mock the global scope for the service worker environment
+global.clients = {
+  claim: jest.fn(() => Promise.resolve()),
+  matchAll: jest.fn(() => Promise.resolve([])),
+  get: jest.fn(() => Promise.resolve(null)),
+} as unknown as ServiceWorkerClients;
 
-// Mock the fetch API
-const mockFetch = vi.fn(() => Promise.resolve(new Response('passthrough')))
-global.fetch = mockFetch
+global.registration = {
+  unregister: jest.fn(() => Promise.resolve(true)),
+} as unknown as ServiceWorkerRegistration;
 
-// Mock the MessageChannel
-const mockPort1Onmessage = vi.fn()
-const mockPostMessage = vi.fn()
-const mockMessageChannel = vi.fn(() => ({
-  port1: { onmessage: mockPort1Onmessage },
-  port2: { postMessage: mockPostMessage },
-}))
-global.MessageChannel = mockMessageChannel as unknown as {
-  new (): MessageChannel
-}
+global.crypto = {
+  randomUUID: mockCrypto.randomUUID,
+} as Crypto;
 
-// Import the module under test after mocking
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const serviceWorker = require('./your-service-worker-file') // Replace with the actual path
+global.fetch = jest.fn(() => Promise.resolve(new Response('passthrough'))) as jest.Mock;
+global.MessageChannel = jest.fn(() => ({
+  port1: { onmessage: jest.fn() },
+  port2: { postMessage: jest.fn() },
+})) as jest.Mock;
 
-describe('Service Worker Tests', () => {
-  let messageHandler: (event: ExtendableMessageEvent) => Promise<void>
-  let fetchHandler: (event: FetchEvent) => void
+// Import the service worker script (adjust the path as needed)
+const serviceWorkerScript = require('../your-service-worker-file');
+
+describe('Service Worker Tests (Jest, RTL, MSW)', () => {
+  let messageHandler: (event: ExtendableMessageEvent) => Promise<void>;
+  let fetchHandler: (event: FetchEvent) => void;
+  const activeClientIds = new Set<string>();
 
   beforeEach(() => {
-    vi.clearAllMocks()
-    // Find the message and fetch event listeners
-    self.addEventListener.mock.calls.forEach((call) => {
-      const type = call[0]
-      const listener = call[1]
-      if (type === 'message') {
-        messageHandler = listener as (event: ExtendableMessageEvent) => Promise<void>
-      } else if (type === 'fetch') {
-        fetchHandler = listener as (event: FetchEvent) => void
-      }
-    })
-    clients.matchAll.mockResolvedValue([])
-    clients.get.mockResolvedValue({
-      id: 'client-1',
-      frameType: 'window',
-      postMessage: mockPostMessage,
-      visibilityState: 'visible',
-    } as unknown as Client)
-  })
+    jest.clearAllMocks();
+    activeClientIds.clear();
+
+    // Reset mocks in global scope
+    global.clients.claim.mockClear();
+    global.clients.matchAll.mockClear();
+    global.clients.get.mockClear();
+    global.registration.unregister.mockClear();
+    (global.fetch as jest.Mock).mockClear();
+    (global.MessageChannel as jest.Mock).mockClear();
+    mockCrypto.randomUUID.mockReturnValue('mock-uuid'); // Reset UUID
+
+    // Extract event listeners from the service worker script
+    const mockSelf = {
+      addEventListener: jest.fn((type, listener) => {
+        if (type === 'message') {
+          messageHandler = listener as (event: ExtendableMessageEvent) => Promise<void>;
+        } else if (type === 'fetch') {
+          fetchHandler = listener as (event: FetchEvent) => void;
+        } else if (type === 'install') {
+          listener(); // Simulate install event
+        } else if (type === 'activate') {
+          const mockEvent = { waitUntil: (promise: Promise<any>) => promise } as ExtendableEvent;
+          listener(mockEvent); // Simulate activate event
+        }
+      }),
+      skipWaiting: jest.fn(),
+      clients: global.clients,
+      registration: global.registration,
+    } as unknown as ServiceWorkerGlobalScope;
+
+    // Execute the service worker script in the mocked global scope
+    serviceWorkerScript.call(mockSelf);
+  });
 
   it('should skip waiting on install', () => {
-    const installHandler = self.addEventListener.mock.calls.find((call) => call[0] === 'install')?.[1]
-    installHandler()
-    expect(self.skipWaiting).toHaveBeenCalled()
-  })
+    expect(mockSelf.skipWaiting).toHaveBeenCalled();
+  });
 
-  it('should claim clients on activate', async () => {
-    const activateHandler = self.addEventListener.mock.calls.find((call) => call[0] === 'activate')?.[1]
-    const waitUntilMock = vi.fn()
-    activateHandler({ waitUntil: waitUntilMock } as ExtendableEvent)
-    expect(waitUntilMock).toHaveBeenCalled()
-    await waitUntilMock.mock.calls[0][0]
-    expect(clients.claim).toHaveBeenCalled()
-  })
+  it('should claim clients on activate', () => {
+    expect(global.clients.claim).toHaveBeenCalled();
+  });
 
   describe('message event listener', () => {
     it('should handle KEEPALIVE_REQUEST', async () => {
-      const mockClient = { id: 'client-1', postMessage: mockPostMessage } as unknown as Client
-      clients.get.mockResolvedValue(mockClient)
-      await messageHandler({
-        source: { id: 'client-1' } as MessagePort,
-        data: 'KEEPALIVE_REQUEST',
-      } as ExtendableMessageEvent)
-      expect(mockPostMessage).toHaveBeenCalledWith({ type: 'KEEPALIVE_RESPONSE' }, [
-        { onmessage: mockPort1Onmessage },
-      ])
-    })
+      const mockSourceClient = mockClient('client-1');
+      (global.clients.get as jest.Mock).mockResolvedValue(mockSourceClient);
+      const mockPortPostMessage = jest.fn();
+      (global.MessageChannel as jest.Mock).mockReturnValue({
+        port1: { onmessage: jest.fn() },
+        port2: { postMessage: mockPortPostMessage },
+      });
+
+      await messageHandler(mockExtendableMessageEvent('KEEPALIVE_REQUEST', mockSourceClient));
+      expect(mockPortPostMessage).toHaveBeenCalledWith({ type: 'KEEPALIVE_RESPONSE' }, []);
+    });
 
     it('should handle INTEGRITY_CHECK_REQUEST', async () => {
-      const mockClient = { id: 'client-1', postMessage: mockPostMessage } as unknown as Client
-      clients.get.mockResolvedValue(mockClient)
-      await messageHandler({
-        source: { id: 'client-1' } as MessagePort,
-        data: 'INTEGRITY_CHECK_REQUEST',
-      } as ExtendableMessageEvent)
-      expect(mockPostMessage).toHaveBeenCalledWith(
+      const mockSourceClient = mockClient('client-1');
+      (global.clients.get as jest.Mock).mockResolvedValue(mockSourceClient);
+      const mockPortPostMessage = jest.fn();
+      (global.MessageChannel as jest.Mock).mockReturnValue({
+        port1: { onmessage: jest.fn() },
+        port2: { postMessage: mockPortPostMessage },
+      });
+
+      await messageHandler(mockExtendableMessageEvent('INTEGRITY_CHECK_REQUEST', mockSourceClient));
+      expect(mockPortPostMessage).toHaveBeenCalledWith(
         {
           type: 'INTEGRITY_CHECK_RESPONSE',
           payload: { packageVersion: '2.6.4', checksum: 'ca7800994cc8bfb5eb961e037c877074' },
         },
-        [{ onmessage: mockPort1Onmessage }],
-      )
-    })
+        [],
+      );
+    });
 
     it('should handle MOCK_ACTIVATE', async () => {
-      const mockClient = { id: 'client-1', frameType: 'window', postMessage: mockPostMessage } as unknown as Client
-      clients.get.mockResolvedValue(mockClient)
-      await messageHandler({
-        source: { id: 'client-1' } as MessagePort,
-        data: 'MOCK_ACTIVATE',
-      } as ExtendableMessageEvent)
-      expect(mockPostMessage).toHaveBeenCalledWith(
+      const mockSourceClient = mockClient('client-1', 'window');
+      (global.clients.get as jest.Mock).mockResolvedValue(mockSourceClient);
+      const mockPortPostMessage = jest.fn();
+      (global.MessageChannel as jest.Mock).mockReturnValue({
+        port1: { onmessage: jest.fn() },
+        port2: { postMessage: mockPortPostMessage },
+      });
+
+      await messageHandler(mockExtendableMessageEvent('MOCK_ACTIVATE', mockSourceClient));
+      expect(activeClientIds.has('client-1')).toBe(true);
+      expect(mockPortPostMessage).toHaveBeenCalledWith(
         {
           type: 'MOCKING_ENABLED',
           payload: { client: { id: 'client-1', frameType: 'window' } },
         },
-        [{ onmessage: mockPort1Onmessage }],
-      )
-    })
+        [],
+      );
+    });
 
     it('should handle MOCK_DEACTIVATE', async () => {
-      const mockClient = { id: 'client-1' } as unknown as Client
-      clients.get.mockResolvedValue(mockClient)
-      await messageHandler({
-        source: { id: 'client-1' } as MessagePort,
-        data: 'MOCK_ACTIVATE',
-      } as ExtendableMessageEvent)
-      await messageHandler({
-        source: { id: 'client-1' } as MessagePort,
-        data: 'MOCK_DEACTIVATE',
-      } as ExtendableMessageEvent)
-      // No expectation on postMessage for deactivate
-    })
+      const mockSourceClient = mockClient('client-1');
+      (global.clients.get as jest.Mock).mockResolvedValue(mockSourceClient);
+      activeClientIds.add('client-1');
+      await messageHandler(mockExtendableMessageEvent('MOCK_DEACTIVATE', mockSourceClient));
+      expect(activeClientIds.has('client-1')).toBe(false);
+    });
 
     it('should handle CLIENT_CLOSED and unregister when no remaining clients', async () => {
-      const mockClient = { id: 'client-1' } as unknown as Client
-      clients.get.mockResolvedValue(mockClient)
-      clients.matchAll.mockResolvedValue([mockClient] as unknown as WindowClient[])
-      await messageHandler({
-        source: { id: 'client-1' } as MessagePort,
-        data: 'MOCK_ACTIVATE',
-      } as ExtendableMessageEvent)
-      await messageHandler({
-        source: { id: 'client-1' } as MessagePort,
-        data: 'CLIENT_CLOSED',
-      } as ExtendableMessageEvent)
-      expect(registration.unregister).toHaveBeenCalled()
-    })
+      const mockSourceClient = mockClient('client-1');
+      (global.clients.get as jest.Mock).mockResolvedValue(mockSourceClient);
+      (global.clients.matchAll as jest.Mock).mockResolvedValue([mockSourceClient]);
+      activeClientIds.add('client-1');
+
+      await messageHandler(mockExtendableMessageEvent('CLIENT_CLOSED', mockSourceClient));
+      expect(activeClientIds.has('client-1')).toBe(false);
+      expect(global.registration.unregister).toHaveBeenCalled();
+    });
 
     it('should handle CLIENT_CLOSED and not unregister when there are remaining clients', async () => {
-      const mockClient1 = { id: 'client-1' } as unknown as Client
-      const mockClient2 = { id: 'client-2' } as unknown as Client
-      clients.get.mockResolvedValue(mockClient1)
-      clients.matchAll.mockResolvedValue([mockClient1, mockClient2] as unknown as WindowClient[])
-      await messageHandler({
-        source: { id: 'client-1' } as MessagePort,
-        data: 'MOCK_ACTIVATE',
-      } as ExtendableMessageEvent)
-      await messageHandler({
-        source: { id: 'client-1' } as MessagePort,
-        data: 'CLIENT_CLOSED',
-      } as ExtendableMessageEvent)
-      expect(registration.unregister).not.toHaveBeenCalled()
-    })
+      const mockSourceClient = mockClient('client-1');
+      const mockRemainingClient = mockWindowClient('client-2');
+      (global.clients.get as jest.Mock).mockResolvedValue(mockSourceClient);
+      (global.clients.matchAll as jest.Mock).mockResolvedValue([mockSourceClient, mockRemainingClient]);
+      activeClientIds.add('client-1');
+
+      await messageHandler(mockExtendableMessageEvent('CLIENT_CLOSED', mockSourceClient));
+      expect(activeClientIds.has('client-1')).toBe(false);
+      expect(global.registration.unregister).not.toHaveBeenCalled();
+    });
 
     it('should return early if clientId or clients is not available', async () => {
-      await messageHandler({ source: null, data: 'KEEPALIVE_REQUEST' } as ExtendableMessageEvent)
-      expect(mockPostMessage).not.toHaveBeenCalled()
-      const originalSelfClients = self.clients
-      // @ts-expect-error intentionally setting to undefined for test
-      self.clients = undefined
-      await messageHandler({ source: { id: 'client-1' } as MessagePort, data: 'KEEPALIVE_REQUEST' } as ExtendableMessageEvent)
-      expect(mockPostMessage).not.toHaveBeenCalled()
-      self.clients = originalSelfClients
-    })
+      const originalClients = global.clients;
+      global.clients = undefined as any;
+      await messageHandler(mockExtendableMessageEvent('KEEPALIVE_REQUEST', mockClient('client-1')));
+      expect((global.MessageChannel as jest.Mock).mock.calls.length).toBe(0);
+      global.clients = originalClients;
+
+      await messageHandler({ source: null } as ExtendableMessageEvent);
+      expect((global.MessageChannel as jest.Mock).mock.calls.length).toBe(0);
+    });
 
     it('should return early if client is not found', async () => {
-      clients.get.mockResolvedValue(null)
-      await messageHandler({
-        source: { id: 'non-existent-client' } as MessagePort,
-        data: 'KEEPALIVE_REQUEST',
-      } as ExtendableMessageEvent)
-      expect(mockPostMessage).not.toHaveBeenCalled()
-    })
-  })
+      (global.clients.get as jest.Mock).mockResolvedValue(null);
+      await messageHandler(mockExtendableMessageEvent('KEEPALIVE_REQUEST', mockClient('non-existent')));
+      expect((global.MessageChannel as jest.Mock).mock.calls.length).toBe(0);
+    });
+  });
 
   describe('fetch event listener', () => {
-    let mockRespondWith: (response: Promise<Response>) => void
-
-    beforeEach(() => {
-      mockRespondWith = vi.fn()
-    })
-
     it('should bypass navigation requests', () => {
-      fetchHandler({ request: { mode: 'navigate' } } as FetchEvent)
-      expect(mockRespondWith).not.toHaveBeenCalled()
-    })
+      const mockRespondWith = jest.fn();
+      fetchHandler(mockFetchEvent('/'));
+      expect(mockRespondWith).not.toHaveBeenCalled();
+    });
 
     it('should bypass "only-if-cached" requests from different origin', () => {
-      fetchHandler({
-        request: { cache: 'only-if-cached', mode: 'no-cors' },
-        respondWith: mockRespondWith,
-      } as FetchEvent)
-      expect(mockRespondWith).not.toHaveBeenCalled()
-    })
+      const mockRespondWith = jest.fn();
+      fetchHandler(mockFetchEvent('/data', 'no-cors', 'only-if-cached', 'GET'));
+      expect(mockRespondWith).not.toHaveBeenCalled();
+    });
 
     it('should bypass all requests when no active clients', () => {
-      // Initially no active clients
-      fetchHandler({
-        request: { url: '/api/data' },
-        respondWith: mockRespondWith,
-      } as FetchEvent)
-      expect(mockRespondWith).not.toHaveBeenCalled()
-    })
+      const mockRespondWith = jest.fn();
+      fetchHandler(mockFetchEvent('/api/data'));
+      expect(mockRespondWith).not.toHaveBeenCalled();
+    });
 
     it('should call handleRequest for other requests', () => {
-      // Activate a client
-      messageHandler({
-        source: { id: 'client-1' } as MessagePort,
-        data: 'MOCK_ACTIVATE',
-      } as ExtendableMessageEvent)
-
-      const mockEvent = {
-        request: { url: '/api/data', mode: 'same-origin' },
-        respondWith: mockRespondWith,
-      } as FetchEvent
-      fetchHandler(mockEvent)
-      expect(mockRespondWith).toHaveBeenCalled()
-    })
-  })
+      const mockRespondWith = jest.fn();
+      (global.clients.matchAll as jest.Mock).mockResolvedValue([mockWindowClient('client-1')]);
+      activeClientIds.add('client-1');
+      fetchHandler(mockFetchEvent('/api/data', 'same-origin', 'default', 'GET', mockRespondWith));
+      expect(mockRespondWith).toHaveBeenCalled();
+    });
+  });
 
   describe('handleRequest function', () => {
-    let mockEvent: FetchEvent
-    let mockResponseClone: Response
+    let handleRequest: (event: FetchEvent, requestId: string) => Promise<Response>;
+    const mockResponseClone = new Response('mocked response', {
+      status: 200,
+      statusText: 'OK',
+      headers: new Headers({ 'Content-Type': 'application/json' }),
+    });
 
     beforeEach(() => {
-      mockResponseClone = new Response('mocked response', {
-        status: 200,
-        statusText: 'OK',
-        headers: new Headers({ 'Content-Type': 'application/json' }),
-      })
-      const mockGetResponse = vi.fn(() => Promise.resolve(mockResponseClone))
-      // @ts-expect-error cannot assign to read-only property
-      global.getResponse = mockGetResponse
+      // Extract the handleRequest function
+      const mockSelf = {
+        addEventListener: jest.fn(),
+        skipWaiting: jest.fn(),
+        clients: global.clients,
+        registration: global.registration,
+      } as unknown as ServiceWorkerGlobalScope;
+      serviceWorkerScript.call(mockSelf);
+      handleRequest = (mockSelf as any).handleRequest; // Access the internal function
 
-      mockEvent = {
-        clientId: 'client-1',
-        request: new Request('/api/data'),
-        respondWith: vi.fn(),
-      } as unknown as FetchEvent
+      jest.clearAllMocks();
+      (global.fetch as jest.Mock).mockResolvedValue(mockResponseClone);
+      (global.clients.get as jest.Mock).mockResolvedValue(mockWindowClient('client-1'));
+      (global.MessageChannel as jest.Mock).mockReturnValue({
+        port1: { onmessage: jest.fn() },
+        port2: { postMessage: jest.fn() },
+      });
+      activeClientIds.add('client-1');
+    });
 
-      clients.get.mockResolvedValue({
-        id: 'client-1',
-        frameType: 'window',
-        postMessage: mockPostMessage,
-      } as unknown as Client)
+    it('should call getResponse and respond with its result', async () => {
+      const mockEvent = mockFetchEvent('/api/data', 'same-origin', 'default', 'GET', jest.fn());
+      const mockGetResponse = jest.fn().mockResolvedValue(mockResponseClone);
+      (mockSelf as any).getResponse = mockGetResponse; // Mock getResponse
 
-      // Activate a client
-      messageHandler({
-        source: { id: 'client-1' } as MessagePort,
-        data: 'MOCK_ACTIVATE',
-      } as ExtendableMessageEvent)
-    })
+      await handleRequest(mockEvent, 'test-request-id');
+      expect(mockGetResponse).toHaveBeenCalledWith(
+        mockEvent,
+        expect.objectContaining({ id: 'client-1' }),
+        'test-request-id',
+      );
+      expect(mockEvent.respondWith).toHaveBeenCalledWith(Promise.resolve(mockResponseClone));
+    });
 
-    it('should call getResponse', async () => {
-      await (serviceWorker as any).handleRequest(mockEvent, 'mock-uuid')
-      expect(global.getResponse).toHaveBeenCalledWith(mockEvent, {
-        id: 'client-1',
-        frameType: 'window',
-        postMessage: mockPostMessage,
-      }, 'mock-uuid')
-    })
+    it('should send a RESPONSE message to the client', async () => {
+      const mockEvent = mockFetchEvent('/api/data', 'same-origin', 'default', 'GET', jest.fn());
+      await handleRequest(mockEvent, 'test-request-id');
+      expect((global.MessageChannel as jest.Mock)).toHaveBeenCalled();
+      const postMessageCall = (global.clients.get as jest.Mock).mock.results[0].value.postMessage;
+      expect(postMessageCall).toHaveBeenCalledWith(
+        {
+          type: 'RESPONSE',
+          payload: {
+            requestId: 'test-request-id',
+            isMockedResponse: false,
+            type: 'basic',
+            status: 200,
+            statusText: 'OK',
+            body: mockResponseClone.body,
+            headers: { 'content-type': 'application/json' },
+          },
+        },
+        expect.any(Array),
+      );
+    });
 
-    it('should send the response to the client', async () => {
-      await (serviceWorker as any).handleRequest(mockEvent, 'mock-uuid')
-      expect(mockPostMessage).toHaveBeenCalled()
-      const message = mockPostMessage.mock.calls[0][0]
-      expect(message.type).toBe('RESPONSE')
-      expect(message.payload.requestId).toBe('mock-uuid')
-      expect(message.payload.isMockedResponse).toBe(false)
-      expect(message.payload.status).toBe(200)
-      expect(message.payload.statusText).toBe('OK')
-      expect(message.payload.headers).toEqual({ 'content-type': 'application/json' })
-    })
-
-    it('should not send response to client if client is not active', async () => {
-      // Deactivate the client
-      messageHandler({
-        source: { id: 'client-1' } as MessagePort,
-        data: 'MOCK_DEACTIVATE',
-      } as ExtendableMessageEvent)
-      await (serviceWorker as any).handleRequest(mockEvent, 'mock-uuid')
-      expect(mockPostMessage).not.toHaveBeenCalled()
-    })
-
-    it('should respond with the response from getResponse', async () => {
-      await (serviceWorker as any).handleRequest(mockEvent, 'mock-uuid')
-      expect(mockEvent.respondWith).toHaveBeenCalledWith(Promise.resolve(mockResponseClone))
-    })
-  })
+    it('should not send RESPONSE if client is not active', async () => {
+      activeClientIds.delete('client-1');
+      const mockEvent = mockFetchEvent('/api/data', 'same-origin', 'default', 'GET', jest.fn());
+      await handleRequest(mockEvent, 'test-request-id');
+      const postMessageCall = (global.clients.get as jest.Mock).mock.results[0].value?.postMessage;
+      expect(postMessageCall).not.toHaveBeenCalled();
+    });
+  });
 
   describe('resolveMainClient function', () => {
-    const mockEvent = { clientId: 'client-1' } as FetchEvent
-    const mockClient = { id: 'client-1', frameType: 'window', visibilityState: 'visible' } as unknown as WindowClient
+    let resolveMainClient: (event: FetchEvent) => Promise<Client | undefined>;
 
     beforeEach(() => {
-      clients.get.mockResolvedValue(mockClient)
-      clients.matchAll.mockResolvedValue([mockClient])
-      // Activate a client
-      messageHandler({
-        source: { id: 'client-1' } as MessagePort,
-        data: 'MOCK_ACTIVATE',
-      } as ExtendableMessageEvent)
-    })
+      // Extract the resolveMainClient function
+      const mockSelf = {
+        addEventListener: jest.fn(),
+        skipWaiting: jest.fn(),
+        clients: global.clients,
+        registration: global.registration,
+      } as unknown as ServiceWorkerGlobalScope;
+      serviceWorkerScript.call(mockSelf);
+      resolveMainClient = (mockSelf as any).resolveMainClient; // Access the internal function
+
+      jest.clearAllMocks();
+      (global.clients.get as jest.Mock).mockResolvedValue(null);
+      (global.clients.matchAll as jest.Mock).mockResolvedValue([]);
+      activeClientIds.clear();
+    });
 
     it('should return the client if it is active', async () => {
-      const client = await (serviceWorker as any).resolveMainClient(mockEvent)
-      expect(client).toEqual(mockClient)
-    })
+      const mockActiveClient = mockWindowClient('active-client');
+      (global.clients.get as jest.Mock).mockResolvedValue(mockActiveClient);
+      activeClientIds.add('active-client');
+      const event = mockFetchEvent('/data', 'same-origin', 'default', 'GET', jest.fn(), 'active-client');
+      const client = await resolveMainClient(event);
+      expect(client).toBe(mockActiveClient);
+    });
 
     it('should return the client if it is top-level and not active', async () => {
-      // Deactivate the client
-      messageHandler({
-        source: { id: 'client-1' } as MessagePort,
-        data: 'MOCK_DEACTIVATE',
-      } as ExtendableMessageEvent)
-      const client = await (serviceWorker as any).resolveMainClient({
-        clientId: 'client-1',
-      } as FetchEvent)
-      expect(client).toEqual(mockClient)
-    })
+      const mockTopLevelClient = mockClient('top-level-client', 'top-level');
+      (global.clients.get as jest.Mock).mockResolvedValue(mockTopLevelClient);
+      const event = mockFetchEvent('/data', 'same-origin', 'default', 'GET', jest.fn(), 'top-level-client');
+      const client = await resolveMainClient(event);
+      expect(client).toBe(mockTopLevelClient);
+    });
 
     it('should return the visible active client from matchAll', async () => {
-      const mockInactiveClient = {
-        id: 'client-2',
-        frameType: 'window',
-        visibilityState: 'hidden',
-      } as unknown as WindowClient
-      clients.matchAll.mockResolvedValue([mockInactiveClient, mockClient])
-      const client = await (serviceWorker as any).resolveMainClient({
-        clientId: 'client-2',
-      } as FetchEvent)
-      expect(client).toEqual(mockClient)
-    })
+      const mockActiveVisibleClient = mockWindowClient('visible-active');
+      const mockInactiveClient = mockWindowClient('inactive', 'window', 'hidden');
+      (global.clients.matchAll as jest.Mock).mockResolvedValue([mockInactiveClient, mockActiveVisibleClient]);
+      activeClientIds.add('visible-active');
+      const event = mockFetchEvent('/data', 'same-origin', 'default', 'GET', jest.fn(), 'some-other-client');
+      const client = await resolveMainClient(event);
+      expect(client).toBe(mockActiveVisibleClient);
+    });
 
     it('should return undefined if no visible active client is found', async () => {
-      // Deactivate the client
-      messageHandler({
-        source: { id: 'client-1' } as MessagePort,
-        data: 'MOCK_DEACTIVATE',
-      } as ExtendableMessageEvent)
-      clients.matchAll.mockResolvedValue([])
-      const client = await (serviceWorker as any).resolveMainClient(mockEvent)
-      expect(client).toBeUndefined()
-    })
-  })
+      const mockInactiveClient = mockWindowClient('inactive', 'window', 'hidden');
+      (global.clients.matchAll as jest.Mock).mockResolvedValue([mockInactiveClient]);
+      const event = mockFetchEvent('/data', 'same-origin', 'default', 'GET', jest.fn(), 'some-client');
+      const client = await resolveMainClient(event);
+      expect(client).toBeUndefined();
+    });
+  });
 
   describe('getResponse function', () => {
-    let mockEvent: FetchEvent
-    let mockClient: Client
+    let getResponse: (event: FetchEvent, client: Client | undefined, requestId: string) => Promise<Response>;
+    const mockPassthroughResponse = new Response('passthrough');
+    const mockMockedResponseData = { body: 'mocked data', status: 200, headers: {} };
+    const mockMockedResponse = new Response('mocked data', { status: 200 });
+    Reflect.defineProperty(mockMockedResponse, Symbol('isMockedResponse'), { value: true, enumerable: true });
 
     beforeEach(() => {
-      mockEvent = {
-        request: new Request('/api/data'),
-        respondWith: vi.fn(),
-      } as unknown as FetchEvent
-      mockClient = { id: 'client-1', postMessage: mockPostMessage } as unknown as Client
-
-      clients.get.mockResolvedValue(mockClient)
-
-      // Activate a client
-      messageHandler({
-        source: { id: 'client-1' } as MessagePort,
-        data: 'MOCK_ACTIVATE',
-      } as ExtendableMessageEvent)
-    })
-
-    it('should call passthrough if no client', async () => {
-      clients.get.mockResolvedValue(null)
-      await (serviceWorker as any).getResponse(mockEvent, null, 'mock-uuid')
-      expect(mockFetch).toHaveBeenCalledWith(new Request('/api/data'), { headers: new Headers() })
-    })
-
-    it('should call passthrough if client is not active', async () => {
-      // Deactivate the client
-      messageHandler({
-        source: { id: 'client-1' } as MessagePort,
-        data: 'MOCK_DEACTIVATE',
-      } as ExtendableMessageEvent)
-      await (serviceWorker as any).getResponse(mockEvent, mockClient, 'mock-uuid')
-      expect(mockFetch).toHaveBeenCalledWith(new Request('/api/data'), { headers: new Headers() })
-    })
-
-    it('should send a REQUEST message to the client', async () => {
-      await (serviceWorker as any).getResponse(mockEvent, mockClient, 'mock-uuid')
-      expect(mockPostMessage).toHaveBeenCalledWith(
-        {
-          type: 'REQUEST',
-          payload: {
-            id: 'mock-uuid',
-            url: '/api/data',
-            mode: 'same-origin',
-            method: 'GET',
-            headers: {},
-            cache: 'default',
-            credentials: 'same-
+      // Extract the getResponse function
+      const mockSelf = {
+        addEventListener: jest.fn(),
+        skipWaiting: jest.fn(),
+        clients: global.clients,
+        registration: global.registration,
+      } as unknown as Service
