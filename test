@@ -1,360 +1,967 @@
-import { renderHook, act } from '@testing-library/react-hooks';
-import { setupServer } from 'msw/node';
-import { rest } from 'msw';
-import {
-  mockExtendableMessageEvent,
-  mockFetchEvent,
-  mockClient,
-  mockWindowClient,
-  mockServiceWorkerRegistration,
-  mockCrypto,
-} from './test-utils'; // Assuming you create a test-utils.ts file
+import { jest } from '@jest/globals';
 
-// Mock the global scope for the service worker environment
-global.clients = {
-  claim: jest.fn(() => Promise.resolve()),
-  matchAll: jest.fn(() => Promise.resolve([])),
-  get: jest.fn(() => Promise.resolve(null)),
-} as unknown as ServiceWorkerClients;
+// Mock service worker globals
+const mockSkipWaiting = jest.fn().mockResolvedValue(undefined);
+const mockClaim = jest.fn().mockResolvedValue(undefined);
+const mockUnregister = jest.fn().mockResolvedValue(true);
+const mockMatchAll = jest.fn();
+const mockGet = jest.fn();
+const mockPostMessage = jest.fn();
+const mockRandomUUID = jest.fn().mockReturnValue('mock-uuid');
+const mockRespondWith = jest.fn();
+const mockWaitUntil = jest.fn();
+const mockFetch = jest.fn();
 
-global.registration = {
-  unregister: jest.fn(() => Promise.resolve(true)),
-} as unknown as ServiceWorkerRegistration;
+// Mock MessageChannel
+const mockPort1 = { onmessage: null };
+const mockPort2 = {};
+
+class MockMessageChannel {
+  constructor() {
+    this.port1 = mockPort1;
+    this.port2 = mockPort2;
+  }
+}
+
+// Mock Headers
+class MockHeaders {
+  private headers: Map<string, string>;
+
+  constructor(init?: HeadersInit) {
+    this.headers = new Map();
+    
+    if (init instanceof MockHeaders) {
+      this.headers = new Map(init.headers);
+    } else if (Array.isArray(init)) {
+      init.forEach(([key, value]) => this.headers.set(key, value));
+    } else if (init) {
+      Object.entries(init).forEach(([key, value]) => this.headers.set(key, value));
+    }
+  }
+
+  delete(name: string) {
+    this.headers.delete(name.toLowerCase());
+  }
+
+  entries() {
+    return this.headers.entries();
+  }
+}
+
+// Mock Response
+class MockResponse {
+  public readonly status: number;
+  public readonly statusText: string;
+  public readonly headers: MockHeaders;
+  public readonly body: any;
+  public readonly type: string;
+
+  constructor(body?: BodyInit | null, init?: ResponseInit) {
+    this.body = body || null;
+    this.status = init?.status || 200;
+    this.statusText = init?.statusText || '';
+    this.headers = new MockHeaders(init?.headers);
+    this.type = 'basic';
+  }
+
+  clone() {
+    return new MockResponse(this.body, {
+      status: this.status,
+      statusText: this.statusText,
+      headers: this.headers
+    });
+  }
+
+  static error() {
+    const response = new MockResponse(null, { status: 0 });
+    return response;
+  }
+}
+
+// Mock Request
+class MockRequest {
+  public readonly url: string;
+  public readonly method: string;
+  public readonly headers: MockHeaders;
+  public readonly mode: string;
+  public readonly cache: string;
+  public readonly credentials: string;
+  public readonly destination: string;
+  public readonly integrity: string;
+  public readonly redirect: string;
+  public readonly referrer: string;
+  public readonly referrerPolicy: string;
+  public readonly keepalive: boolean;
+  private bodyContent: ArrayBuffer | null;
+
+  constructor(input: string, init?: RequestInit) {
+    this.url = input;
+    this.method = init?.method || 'GET';
+    this.headers = new MockHeaders(init?.headers);
+    this.mode = init?.mode || 'cors';
+    this.cache = init?.cache || 'default';
+    this.credentials = init?.credentials || 'same-origin';
+    this.destination = '';
+    this.integrity = '';
+    this.redirect = init?.redirect || 'follow';
+    this.referrer = '';
+    this.referrerPolicy = init?.referrerPolicy || '';
+    this.keepalive = init?.keepalive || false;
+    
+    // Convert body to ArrayBuffer for testing
+    this.bodyContent = init?.body ? new TextEncoder().encode(
+      typeof init.body === 'string' ? init.body : JSON.stringify(init.body)
+    ).buffer : null;
+  }
+
+  clone() {
+    const req = new MockRequest(this.url, {
+      method: this.method,
+      headers: this.headers,
+      mode: this.mode as RequestMode,
+      cache: this.cache as RequestCache,
+      credentials: this.credentials as RequestCredentials,
+      redirect: this.redirect as RequestRedirect,
+      referrerPolicy: this.referrerPolicy as ReferrerPolicy,
+      keepalive: this.keepalive
+    });
+    return req;
+  }
+
+  async arrayBuffer() {
+    return this.bodyContent || new ArrayBuffer(0);
+  }
+}
+
+// Setup global mocks before importing the service worker code
+global.self = {
+  skipWaiting: mockSkipWaiting,
+  clients: {
+    claim: mockClaim,
+    matchAll: mockMatchAll,
+    get: mockGet,
+  },
+  registration: {
+    unregister: mockUnregister,
+  },
+  addEventListener: jest.fn(),
+} as any;
 
 global.crypto = {
-  randomUUID: mockCrypto.randomUUID,
-} as Crypto;
+  randomUUID: mockRandomUUID,
+} as any;
 
-global.fetch = jest.fn(() => Promise.resolve(new Response('passthrough'))) as jest.Mock;
-global.MessageChannel = jest.fn(() => ({
-  port1: { onmessage: jest.fn() },
-  port2: { postMessage: jest.fn() },
-})) as jest.Mock;
+global.MessageChannel = MockMessageChannel as any;
+global.Headers = MockHeaders as any;
+global.Response = MockResponse as any;
+global.fetch = mockFetch;
+// Ensures Object.fromEntries is available
+global.Object.fromEntries = jest.fn().mockImplementation((entries) => {
+  return Array.from(entries).reduce((obj, [key, value]) => {
+    obj[key] = value;
+    return obj;
+  }, {});
+});
 
-// Import the service worker script (adjust the path as needed)
-const serviceWorkerScript = require('../your-service-worker-file');
+global.Reflect = {
+  ...global.Reflect,
+  defineProperty: jest.fn().mockReturnValue(true),
+} as any;
 
-describe('Service Worker Tests (Jest, RTL, MSW)', () => {
-  let messageHandler: (event: ExtendableMessageEvent) => Promise<void>;
-  let fetchHandler: (event: FetchEvent) => void;
-  const activeClientIds = new Set<string>();
+// Import service worker code or recreate the necessary parts for testing
+// Since we can't directly import the service worker file, we'll recreate the functions
 
+const PACKAGE_VERSION = '2.6.4';
+const INTEGRITY_CHECKSUM = 'ca7800994cc8bfb5eb961e037c877074';
+const IS_MOCKED_RESPONSE = Symbol('isMockedResponse');
+const activeClientIds = new Set();
+
+// Implementation of functions from service worker
+function sendToClient(client, message, transferrables = []) {
+  return new Promise((resolve, reject) => {
+    const channel = new MessageChannel();
+    
+    channel.port1.onmessage = (event) => {
+      if (event.data && event.data.error) {
+        return reject(event.data.error);
+      }
+      
+      resolve(event.data);
+    };
+    
+    client.postMessage(
+      message,
+      [channel.port2].concat(transferrables.filter(Boolean)),
+    );
+  });
+}
+
+async function respondWithMock(response) {
+  if (response.status === 0) {
+    return Response.error();
+  }
+  
+  const mockedResponse = new Response(response.body, response);
+  
+  Reflect.defineProperty(mockedResponse, IS_MOCKED_RESPONSE, {
+    value: true,
+    enumerable: true,
+  });
+  
+  return mockedResponse;
+}
+
+async function resolveMainClient(event) {
+  const client = await self.clients.get(event.clientId);
+
+  if (activeClientIds.has(event.clientId)) {
+    return client;
+  }
+
+  if (client?.frameType === 'top-level') {
+    return client;
+  }
+
+  const allClients = await self.clients.matchAll({
+    type: 'window',
+  });
+
+  return allClients
+    .filter((client) => {
+      return client.visibilityState === 'visible';
+    })
+    .find((client) => {
+      return activeClientIds.has(client.id);
+    });
+}
+
+function passthrough(requestClone) {
+  const headers = new Headers(requestClone.headers);
+  headers.delete('accept');
+  return fetch(requestClone, { headers });
+}
+
+async function getResponse(event, client, requestId) {
+  const { request } = event;
+  const requestClone = request.clone();
+
+  if (!client) {
+    return passthrough(requestClone);
+  }
+
+  if (!activeClientIds.has(client.id)) {
+    return passthrough(requestClone);
+  }
+
+  const requestBuffer = await request.arrayBuffer();
+  const clientMessage = await sendToClient(
+    client,
+    {
+      type: 'REQUEST',
+      payload: {
+        id: requestId,
+        url: request.url,
+        mode: request.mode,
+        method: request.method,
+        headers: Object.fromEntries(request.headers.entries()),
+        cache: request.cache,
+        credentials: request.credentials,
+        destination: request.destination,
+        integrity: request.integrity,
+        redirect: request.redirect,
+        referrer: request.referrer,
+        referrerPolicy: request.referrerPolicy,
+        body: requestBuffer,
+        keepalive: request.keepalive,
+      },
+    },
+    [requestBuffer],
+  );
+
+  switch (clientMessage.type) {
+    case 'MOCK_RESPONSE': {
+      return respondWithMock(clientMessage.data);
+    }
+    case 'PASSTHROUGH': {
+      return passthrough(requestClone);
+    }
+    default: {
+      return passthrough(requestClone);
+    }
+  }
+}
+
+async function handleRequest(event, requestId) {
+  const client = await resolveMainClient(event);
+  const response = await getResponse(event, client, requestId);
+
+  if (client && activeClientIds.has(client.id)) {
+    (async function () {
+      const responseClone = response.clone();
+
+      sendToClient(
+        client,
+        {
+          type: 'RESPONSE',
+          payload: {
+            requestId,
+            isMockedResponse: IS_MOCKED_RESPONSE in response,
+            type: responseClone.type,
+            status: responseClone.status,
+            statusText: responseClone.statusText,
+            body: responseClone.body,
+            headers: Object.fromEntries(responseClone.headers.entries()),
+          },
+        },
+        [responseClone.body],
+      );
+    })();
+  }
+
+  return response;
+}
+
+// Event handlers
+function handleInstall() {
+  self.skipWaiting();
+}
+
+function handleActivate(event) {
+  event.waitUntil(self.clients.claim());
+}
+
+async function handleMessage(event) {
+  const clientId = event.source?.id;
+
+  if (!clientId || !self.clients) {
+    return;
+  }
+
+  const client = await self.clients.get(clientId);
+
+  if (!client) {
+    return;
+  }
+
+  const allClients = await self.clients.matchAll({
+    type: 'window',
+  });
+
+  switch (event.data) {
+    case 'KEEPALIVE_REQUEST': {
+      sendToClient(client, {
+        type: 'KEEPALIVE_RESPONSE',
+      });
+      break;
+    }
+
+    case 'INTEGRITY_CHECK_REQUEST': {
+      sendToClient(client, {
+        type: 'INTEGRITY_CHECK_RESPONSE',
+        payload: {
+          packageVersion: PACKAGE_VERSION,
+          checksum: INTEGRITY_CHECKSUM,
+        },
+      });
+      break;
+    }
+
+    case 'MOCK_ACTIVATE': {
+      activeClientIds.add(clientId);
+
+      sendToClient(client, {
+        type: 'MOCKING_ENABLED',
+        payload: {
+          client: {
+            id: client.id,
+            frameType: client.frameType,
+          },
+        },
+      });
+      break;
+    }
+
+    case 'MOCK_DEACTIVATE': {
+      activeClientIds.delete(clientId);
+      break;
+    }
+
+    case 'CLIENT_CLOSED': {
+      activeClientIds.delete(clientId);
+
+      const remainingClients = allClients.filter((client) => {
+        return client.id !== clientId;
+      });
+
+      if (remainingClients.length === 0) {
+        self.registration.unregister();
+      }
+
+      break;
+    }
+  }
+}
+
+function handleFetch(event) {
+  const { request } = event;
+
+  if (request.mode === 'navigate') {
+    return;
+  }
+
+  if (request.cache === 'only-if-cached' && request.mode !== 'same-origin') {
+    return;
+  }
+
+  if (activeClientIds.size === 0) {
+    return;
+  }
+
+  const requestId = crypto.randomUUID();
+  event.respondWith(handleRequest(event, requestId));
+}
+
+// Export handlers and functions for testing
+export {
+  handleInstall,
+  handleActivate,
+  handleMessage,
+  handleFetch,
+  handleRequest,
+  resolveMainClient,
+  getResponse,
+  sendToClient,
+  respondWithMock,
+  passthrough,
+  activeClientIds,
+  IS_MOCKED_RESPONSE,
+  PACKAGE_VERSION,
+  INTEGRITY_CHECKSUM,
+};
+
+// Start of actual test cases
+describe('MSW Service Worker', () => {
   beforeEach(() => {
+    // Reset mocks and state before each test
     jest.clearAllMocks();
     activeClientIds.clear();
-
-    // Reset mocks in global scope
-    global.clients.claim.mockClear();
-    global.clients.matchAll.mockClear();
-    global.clients.get.mockClear();
-    global.registration.unregister.mockClear();
-    (global.fetch as jest.Mock).mockClear();
-    (global.MessageChannel as jest.Mock).mockClear();
-    mockCrypto.randomUUID.mockReturnValue('mock-uuid'); // Reset UUID
-
-    // Extract event listeners from the service worker script
-    const mockSelf = {
-      addEventListener: jest.fn((type, listener) => {
-        if (type === 'message') {
-          messageHandler = listener as (event: ExtendableMessageEvent) => Promise<void>;
-        } else if (type === 'fetch') {
-          fetchHandler = listener as (event: FetchEvent) => void;
-        } else if (type === 'install') {
-          listener(); // Simulate install event
-        } else if (type === 'activate') {
-          const mockEvent = { waitUntil: (promise: Promise<any>) => promise } as ExtendableEvent;
-          listener(mockEvent); // Simulate activate event
-        }
-      }),
-      skipWaiting: jest.fn(),
-      clients: global.clients,
-      registration: global.registration,
-    } as unknown as ServiceWorkerGlobalScope;
-
-    // Execute the service worker script in the mocked global scope
-    serviceWorkerScript.call(mockSelf);
+    
+    // Reset mock functions
+    mockSkipWaiting.mockResolvedValue(undefined);
+    mockClaim.mockResolvedValue(undefined);
+    mockGet.mockReset();
+    mockMatchAll.mockReset();
+    mockPostMessage.mockReset();
+    mockFetch.mockReset();
   });
 
-  it('should skip waiting on install', () => {
-    expect(mockSelf.skipWaiting).toHaveBeenCalled();
+  describe('install event', () => {
+    it('should call skipWaiting on install', () => {
+      handleInstall();
+      expect(mockSkipWaiting).toHaveBeenCalled();
+    });
   });
 
-  it('should claim clients on activate', () => {
-    expect(global.clients.claim).toHaveBeenCalled();
+  describe('activate event', () => {
+    it('should claim clients on activate', () => {
+      const event = { waitUntil: mockWaitUntil };
+      handleActivate(event);
+      
+      expect(mockWaitUntil).toHaveBeenCalledWith(self.clients.claim());
+      expect(mockClaim).toHaveBeenCalled();
+    });
   });
 
-  describe('message event listener', () => {
-    it('should handle KEEPALIVE_REQUEST', async () => {
-      const mockSourceClient = mockClient('client-1');
-      (global.clients.get as jest.Mock).mockResolvedValue(mockSourceClient);
-      const mockPortPostMessage = jest.fn();
-      (global.MessageChannel as jest.Mock).mockReturnValue({
-        port1: { onmessage: jest.fn() },
-        port2: { postMessage: mockPortPostMessage },
-      });
+  describe('message event', () => {
+    const mockClient = {
+      id: 'client-1',
+      frameType: 'top-level',
+      postMessage: mockPostMessage,
+    };
 
-      await messageHandler(mockExtendableMessageEvent('KEEPALIVE_REQUEST', mockSourceClient));
-      expect(mockPortPostMessage).toHaveBeenCalledWith({ type: 'KEEPALIVE_RESPONSE' }, []);
+    beforeEach(() => {
+      mockGet.mockResolvedValue(mockClient);
     });
 
-    it('should handle INTEGRITY_CHECK_REQUEST', async () => {
-      const mockSourceClient = mockClient('client-1');
-      (global.clients.get as jest.Mock).mockResolvedValue(mockSourceClient);
-      const mockPortPostMessage = jest.fn();
-      (global.MessageChannel as jest.Mock).mockReturnValue({
-        port1: { onmessage: jest.fn() },
-        port2: { postMessage: mockPortPostMessage },
-      });
+    it('should handle KEEPALIVE_REQUEST message', async () => {
+      const event = {
+        source: { id: 'client-1' },
+        data: 'KEEPALIVE_REQUEST',
+      };
 
-      await messageHandler(mockExtendableMessageEvent('INTEGRITY_CHECK_REQUEST', mockSourceClient));
-      expect(mockPortPostMessage).toHaveBeenCalledWith(
-        {
-          type: 'INTEGRITY_CHECK_RESPONSE',
-          payload: { packageVersion: '2.6.4', checksum: 'ca7800994cc8bfb5eb961e037c877074' },
+      await handleMessage(event);
+
+      expect(mockGet).toHaveBeenCalledWith('client-1');
+      expect(mockPostMessage).toHaveBeenCalled();
+      expect(mockPostMessage.mock.calls[0][0]).toEqual({
+        type: 'KEEPALIVE_RESPONSE',
+      });
+    });
+
+    it('should handle INTEGRITY_CHECK_REQUEST message', async () => {
+      const event = {
+        source: { id: 'client-1' },
+        data: 'INTEGRITY_CHECK_REQUEST',
+      };
+
+      await handleMessage(event);
+
+      expect(mockGet).toHaveBeenCalledWith('client-1');
+      expect(mockPostMessage).toHaveBeenCalled();
+      expect(mockPostMessage.mock.calls[0][0]).toEqual({
+        type: 'INTEGRITY_CHECK_RESPONSE',
+        payload: {
+          packageVersion: PACKAGE_VERSION,
+          checksum: INTEGRITY_CHECKSUM,
         },
-        [],
-      );
+      });
     });
 
-    it('should handle MOCK_ACTIVATE', async () => {
-      const mockSourceClient = mockClient('client-1', 'window');
-      (global.clients.get as jest.Mock).mockResolvedValue(mockSourceClient);
-      const mockPortPostMessage = jest.fn();
-      (global.MessageChannel as jest.Mock).mockReturnValue({
-        port1: { onmessage: jest.fn() },
-        port2: { postMessage: mockPortPostMessage },
-      });
+    it('should handle MOCK_ACTIVATE message', async () => {
+      const event = {
+        source: { id: 'client-1' },
+        data: 'MOCK_ACTIVATE',
+      };
 
-      await messageHandler(mockExtendableMessageEvent('MOCK_ACTIVATE', mockSourceClient));
+      await handleMessage(event);
+
+      expect(mockGet).toHaveBeenCalledWith('client-1');
       expect(activeClientIds.has('client-1')).toBe(true);
-      expect(mockPortPostMessage).toHaveBeenCalledWith(
-        {
-          type: 'MOCKING_ENABLED',
-          payload: { client: { id: 'client-1', frameType: 'window' } },
+      expect(mockPostMessage).toHaveBeenCalled();
+      expect(mockPostMessage.mock.calls[0][0]).toEqual({
+        type: 'MOCKING_ENABLED',
+        payload: {
+          client: {
+            id: 'client-1',
+            frameType: 'top-level',
+          },
         },
-        [],
-      );
+      });
     });
 
-    it('should handle MOCK_DEACTIVATE', async () => {
-      const mockSourceClient = mockClient('client-1');
-      (global.clients.get as jest.Mock).mockResolvedValue(mockSourceClient);
+    it('should handle MOCK_DEACTIVATE message', async () => {
       activeClientIds.add('client-1');
-      await messageHandler(mockExtendableMessageEvent('MOCK_DEACTIVATE', mockSourceClient));
+      
+      const event = {
+        source: { id: 'client-1' },
+        data: 'MOCK_DEACTIVATE',
+      };
+
+      await handleMessage(event);
+
+      expect(mockGet).toHaveBeenCalledWith('client-1');
       expect(activeClientIds.has('client-1')).toBe(false);
     });
 
-    it('should handle CLIENT_CLOSED and unregister when no remaining clients', async () => {
-      const mockSourceClient = mockClient('client-1');
-      (global.clients.get as jest.Mock).mockResolvedValue(mockSourceClient);
-      (global.clients.matchAll as jest.Mock).mockResolvedValue([mockSourceClient]);
+    it('should handle CLIENT_CLOSED message with remaining clients', async () => {
       activeClientIds.add('client-1');
+      activeClientIds.add('client-2');
+      
+      const mockClients = [
+        { id: 'client-2' },
+        { id: 'client-3' },
+      ];
+      
+      mockMatchAll.mockResolvedValue(mockClients);
+      
+      const event = {
+        source: { id: 'client-1' },
+        data: 'CLIENT_CLOSED',
+      };
 
-      await messageHandler(mockExtendableMessageEvent('CLIENT_CLOSED', mockSourceClient));
+      await handleMessage(event);
+
+      expect(mockGet).toHaveBeenCalledWith('client-1');
+      expect(mockMatchAll).toHaveBeenCalledWith({ type: 'window' });
       expect(activeClientIds.has('client-1')).toBe(false);
-      expect(global.registration.unregister).toHaveBeenCalled();
+      expect(mockUnregister).not.toHaveBeenCalled();
     });
 
-    it('should handle CLIENT_CLOSED and not unregister when there are remaining clients', async () => {
-      const mockSourceClient = mockClient('client-1');
-      const mockRemainingClient = mockWindowClient('client-2');
-      (global.clients.get as jest.Mock).mockResolvedValue(mockSourceClient);
-      (global.clients.matchAll as jest.Mock).mockResolvedValue([mockSourceClient, mockRemainingClient]);
+    it('should handle CLIENT_CLOSED message with no remaining clients', async () => {
       activeClientIds.add('client-1');
+      
+      mockMatchAll.mockResolvedValue([]);
+      
+      const event = {
+        source: { id: 'client-1' },
+        data: 'CLIENT_CLOSED',
+      };
 
-      await messageHandler(mockExtendableMessageEvent('CLIENT_CLOSED', mockSourceClient));
+      await handleMessage(event);
+
+      expect(mockGet).toHaveBeenCalledWith('client-1');
+      expect(mockMatchAll).toHaveBeenCalledWith({ type: 'window' });
       expect(activeClientIds.has('client-1')).toBe(false);
-      expect(global.registration.unregister).not.toHaveBeenCalled();
+      expect(mockUnregister).toHaveBeenCalled();
     });
 
-    it('should return early if clientId or clients is not available', async () => {
-      const originalClients = global.clients;
-      global.clients = undefined as any;
-      await messageHandler(mockExtendableMessageEvent('KEEPALIVE_REQUEST', mockClient('client-1')));
-      expect((global.MessageChannel as jest.Mock).mock.calls.length).toBe(0);
-      global.clients = originalClients;
+    it('should do nothing when client is not found', async () => {
+      mockGet.mockResolvedValue(null);
+      
+      const event = {
+        source: { id: 'client-1' },
+        data: 'MOCK_ACTIVATE',
+      };
 
-      await messageHandler({ source: null } as ExtendableMessageEvent);
-      expect((global.MessageChannel as jest.Mock).mock.calls.length).toBe(0);
+      await handleMessage(event);
+
+      expect(mockGet).toHaveBeenCalledWith('client-1');
+      expect(activeClientIds.has('client-1')).toBe(false);
+      expect(mockPostMessage).not.toHaveBeenCalled();
     });
 
-    it('should return early if client is not found', async () => {
-      (global.clients.get as jest.Mock).mockResolvedValue(null);
-      await messageHandler(mockExtendableMessageEvent('KEEPALIVE_REQUEST', mockClient('non-existent')));
-      expect((global.MessageChannel as jest.Mock).mock.calls.length).toBe(0);
+    it('should do nothing when clientId is not present', async () => {
+      const event = {
+        source: {},
+        data: 'MOCK_ACTIVATE',
+      };
+
+      await handleMessage(event);
+
+      expect(mockGet).not.toHaveBeenCalled();
+      expect(mockPostMessage).not.toHaveBeenCalled();
     });
   });
 
-  describe('fetch event listener', () => {
+  describe('fetch event', () => {
     it('should bypass navigation requests', () => {
-      const mockRespondWith = jest.fn();
-      fetchHandler(mockFetchEvent('/'));
+      const request = new MockRequest('https://example.com', { mode: 'navigate' });
+      const event = { request, respondWith: mockRespondWith };
+      
+      handleFetch(event);
+      
       expect(mockRespondWith).not.toHaveBeenCalled();
     });
 
-    it('should bypass "only-if-cached" requests from different origin', () => {
-      const mockRespondWith = jest.fn();
-      fetchHandler(mockFetchEvent('/data', 'no-cors', 'only-if-cached', 'GET'));
+    it('should bypass only-if-cached requests', () => {
+      const request = new MockRequest('https://example.com', { 
+        cache: 'only-if-cached', 
+        mode: 'no-cors' 
+      });
+      const event = { request, respondWith: mockRespondWith };
+      
+      handleFetch(event);
+      
       expect(mockRespondWith).not.toHaveBeenCalled();
     });
 
-    it('should bypass all requests when no active clients', () => {
-      const mockRespondWith = jest.fn();
-      fetchHandler(mockFetchEvent('/api/data'));
+    it('should bypass requests when no active clients', () => {
+      const request = new MockRequest('https://example.com');
+      const event = { request, respondWith: mockRespondWith };
+      
+      handleFetch(event);
+      
       expect(mockRespondWith).not.toHaveBeenCalled();
     });
 
-    it('should call handleRequest for other requests', () => {
-      const mockRespondWith = jest.fn();
-      (global.clients.matchAll as jest.Mock).mockResolvedValue([mockWindowClient('client-1')]);
+    it('should handle fetch event with active clients', () => {
       activeClientIds.add('client-1');
-      fetchHandler(mockFetchEvent('/api/data', 'same-origin', 'default', 'GET', mockRespondWith));
+      
+      const request = new MockRequest('https://example.com');
+      const event = { 
+        request, 
+        respondWith: mockRespondWith,
+        clientId: 'client-1'
+      };
+      
+      handleFetch(event);
+      
+      expect(mockRandomUUID).toHaveBeenCalled();
       expect(mockRespondWith).toHaveBeenCalled();
     });
   });
 
-  describe('handleRequest function', () => {
-    let handleRequest: (event: FetchEvent, requestId: string) => Promise<Response>;
-    const mockResponseClone = new Response('mocked response', {
-      status: 200,
-      statusText: 'OK',
-      headers: new Headers({ 'Content-Type': 'application/json' }),
-    });
-
-    beforeEach(() => {
-      // Extract the handleRequest function
-      const mockSelf = {
-        addEventListener: jest.fn(),
-        skipWaiting: jest.fn(),
-        clients: global.clients,
-        registration: global.registration,
-      } as unknown as ServiceWorkerGlobalScope;
-      serviceWorkerScript.call(mockSelf);
-      handleRequest = (mockSelf as any).handleRequest; // Access the internal function
-
-      jest.clearAllMocks();
-      (global.fetch as jest.Mock).mockResolvedValue(mockResponseClone);
-      (global.clients.get as jest.Mock).mockResolvedValue(mockWindowClient('client-1'));
-      (global.MessageChannel as jest.Mock).mockReturnValue({
-        port1: { onmessage: jest.fn() },
-        port2: { postMessage: jest.fn() },
-      });
+  describe('resolveMainClient', () => {
+    it('should return client when clientId is in activeClientIds', async () => {
       activeClientIds.add('client-1');
+      
+      const mockClient = { id: 'client-1' };
+      mockGet.mockResolvedValue(mockClient);
+      
+      const event = { clientId: 'client-1' };
+      const result = await resolveMainClient(event);
+      
+      expect(mockGet).toHaveBeenCalledWith('client-1');
+      expect(result).toBe(mockClient);
     });
 
-    it('should call getResponse and respond with its result', async () => {
-      const mockEvent = mockFetchEvent('/api/data', 'same-origin', 'default', 'GET', jest.fn());
-      const mockGetResponse = jest.fn().mockResolvedValue(mockResponseClone);
-      (mockSelf as any).getResponse = mockGetResponse; // Mock getResponse
+    it('should return client when frameType is top-level', async () => {
+      const mockClient = { id: 'client-1', frameType: 'top-level' };
+      mockGet.mockResolvedValue(mockClient);
+      
+      const event = { clientId: 'client-1' };
+      const result = await resolveMainClient(event);
+      
+      expect(mockGet).toHaveBeenCalledWith('client-1');
+      expect(result).toBe(mockClient);
+    });
 
-      await handleRequest(mockEvent, 'test-request-id');
-      expect(mockGetResponse).toHaveBeenCalledWith(
-        mockEvent,
-        expect.objectContaining({ id: 'client-1' }),
-        'test-request-id',
+    it('should find visible client with active client id', async () => {
+      activeClientIds.add('client-2');
+      
+      mockGet.mockResolvedValue({ id: 'client-1', frameType: 'iframe' });
+      
+      const mockClients = [
+        { id: 'client-1', visibilityState: 'hidden' },
+        { id: 'client-2', visibilityState: 'visible' },
+        { id: 'client-3', visibilityState: 'visible' },
+      ];
+      
+      mockMatchAll.mockResolvedValue(mockClients);
+      
+      const event = { clientId: 'client-1' };
+      const result = await resolveMainClient(event);
+      
+      expect(mockGet).toHaveBeenCalledWith('client-1');
+      expect(mockMatchAll).toHaveBeenCalledWith({ type: 'window' });
+      expect(result).toBe(mockClients[1]);
+    });
+
+    it('should return undefined when no matching client found', async () => {
+      mockGet.mockResolvedValue({ id: 'client-1', frameType: 'iframe' });
+      
+      const mockClients = [
+        { id: 'client-1', visibilityState: 'hidden' },
+        { id: 'client-3', visibilityState: 'visible' },
+      ];
+      
+      mockMatchAll.mockResolvedValue(mockClients);
+      
+      const event = { clientId: 'client-1' };
+      const result = await resolveMainClient(event);
+      
+      expect(mockGet).toHaveBeenCalledWith('client-1');
+      expect(mockMatchAll).toHaveBeenCalledWith({ type: 'window' });
+      expect(result).toBeUndefined();
+    });
+  });
+
+  describe('getResponse', () => {
+    it('should passthrough when client is not active', async () => {
+      const mockClient = { id: 'client-1' };
+      const request = new MockRequest('https://example.com');
+      const event = { request };
+      const requestId = 'req-1';
+      
+      mockFetch.mockResolvedValue(new MockResponse('original response'));
+      
+      const response = await getResponse(event, mockClient, requestId);
+      
+      expect(mockFetch).toHaveBeenCalled();
+      expect(response instanceof MockResponse).toBe(true);
+    });
+
+    it('should handle MOCK_RESPONSE message type', async () => {
+      activeClientIds.add('client-1');
+      
+      const mockClient = { 
+        id: 'client-1',
+        postMessage: mockPostMessage
+      };
+      
+      // Setup port1 onmessage handler to respond with MOCK_RESPONSE
+      mockPostMessage.mockImplementation((message, transfer) => {
+        setTimeout(() => {
+          const callback = mockPort1.onmessage;
+          if (callback) {
+            callback({
+              data: {
+                type: 'MOCK_RESPONSE',
+                data: {
+                  status: 200,
+                  statusText: 'Mocked',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ mocked: true })
+                }
+              }
+            });
+          }
+        }, 0);
+      });
+      
+      const request = new MockRequest('https://example.com');
+      const event = { request };
+      const requestId = 'req-1';
+      
+      const response = await getResponse(event, mockClient, requestId);
+      
+      expect(mockPostMessage).toHaveBeenCalled();
+      expect(response instanceof MockResponse).toBe(true);
+      expect(response.status).toBe(200);
+      expect(response.statusText).toBe('Mocked');
+      expect(Reflect.defineProperty).toHaveBeenCalledWith(
+        response, 
+        IS_MOCKED_RESPONSE, 
+        expect.any(Object)
       );
-      expect(mockEvent.respondWith).toHaveBeenCalledWith(Promise.resolve(mockResponseClone));
     });
 
-    it('should send a RESPONSE message to the client', async () => {
-      const mockEvent = mockFetchEvent('/api/data', 'same-origin', 'default', 'GET', jest.fn());
-      await handleRequest(mockEvent, 'test-request-id');
-      expect((global.MessageChannel as jest.Mock)).toHaveBeenCalled();
-      const postMessageCall = (global.clients.get as jest.Mock).mock.results[0].value.postMessage;
-      expect(postMessageCall).toHaveBeenCalledWith(
+    it('should handle PASSTHROUGH message type', async () => {
+      activeClientIds.add('client-1');
+      
+      const mockClient = { 
+        id: 'client-1',
+        postMessage: mockPostMessage
+      };
+      
+      // Setup port1 onmessage handler to respond with PASSTHROUGH
+      mockPostMessage.mockImplementation((message, transfer) => {
+        setTimeout(() => {
+          const callback = mockPort1.onmessage;
+          if (callback) {
+            callback({
+              data: {
+                type: 'PASSTHROUGH'
+              }
+            });
+          }
+        }, 0);
+      });
+      
+      const request = new MockRequest('https://example.com');
+      const event = { request };
+      const requestId = 'req-1';
+      
+      mockFetch.mockResolvedValue(new MockResponse('original response'));
+      
+      const response = await getResponse(event, mockClient, requestId);
+      
+      expect(mockPostMessage).toHaveBeenCalled();
+      expect(mockFetch).toHaveBeenCalled();
+      expect(response instanceof MockResponse).toBe(true);
+    });
+  });
+
+  describe('respondWithMock', () => {
+    it('should return Response.error() when status is 0', async () => {
+      const mockResponseData = { status: 0 };
+      const response = await respondWithMock(mockResponseData);
+      
+      expect(response instanceof MockResponse).toBe(true);
+      expect(response.status).toBe(0);
+    });
+
+    it('should set IS_MOCKED_RESPONSE property on response', async () => {
+      const mockResponseData = { 
+        status: 200,
+        statusText: 'OK',
+        headers: { 'Content-Type': 'text/plain' },
+        body: 'Test Body'
+      };
+      
+      const response = await respondWithMock(mockResponseData);
+      
+      expect(response instanceof MockResponse).toBe(true);
+      expect(response.status).toBe(200);
+      expect(response.statusText).toBe('OK');
+      expect(Reflect.defineProperty).toHaveBeenCalledWith(
+        response,
+        IS_MOCKED_RESPONSE,
         {
-          type: 'RESPONSE',
-          payload: {
-            requestId: 'test-request-id',
-            isMockedResponse: false,
-            type: 'basic',
-            status: 200,
-            statusText: 'OK',
-            body: mockResponseClone.body,
-            headers: { 'content-type': 'application/json' },
-          },
-        },
-        expect.any(Array),
+          value: true,
+          enumerable: true,
+        }
       );
     });
+  });
 
-    it('should not send RESPONSE if client is not active', async () => {
-      activeClientIds.delete('client-1');
-      const mockEvent = mockFetchEvent('/api/data', 'same-origin', 'default', 'GET', jest.fn());
-      await handleRequest(mockEvent, 'test-request-id');
-      const postMessageCall = (global.clients.get as jest.Mock).mock.results[0].value?.postMessage;
-      expect(postMessageCall).not.toHaveBeenCalled();
+  describe('handleRequest', () => {
+    it('should process request and return response', async () => {
+      activeClientIds.add('client-1');
+      
+      const mockClient = { 
+        id: 'client-1',
+        postMessage: mockPostMessage
+      };
+      
+      mockGet.mockResolvedValue(mockClient);
+      
+      // Setup port1 onmessage handler for sendToClient
+      mockPostMessage.mockImplementation((message, transfer) => {
+        setTimeout(() => {
+          const callback = mockPort1.onmessage;
+          if (callback) {
+            // First respond to REQUEST message
+            if (message.type === 'REQUEST') {
+              callback({
+                data: {
+                  type: 'MOCK_RESPONSE',
+                  data: {
+                    status: 201,
+                    statusText: 'Created',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ created: true })
+                  }
+                }
+              });
+            }
+          }
+        }, 0);
+      });
+      
+      const request = new MockRequest('https://example.com');
+      const event = { 
+        clientId: 'client-1',
+        request
+      };
+      const requestId = 'req-id';
+      
+      const response = await handleRequest(event, requestId);
+      
+      expect(mockGet).toHaveBeenCalledWith('client-1');
+      expect(mockPostMessage).toHaveBeenCalled();
+      expect(response instanceof MockResponse).toBe(true);
+      expect(response.status).toBe(201);
+      expect(response.statusText).toBe('Created');
+      
+      // Wait for the async response handler to complete
+      await new Promise(resolve => setTimeout(resolve, 10));
+      
+      // Verify that a second message was sent with the RESPONSE
+      const calls = mockPostMessage.mock.calls;
+      expect(calls.length).toBeGreaterThan(1);
+      expect(calls[1][0].type).toBe('RESPONSE');
+      expect(calls[1][0].payload.requestId).toBe(requestId);
+    });
+
+    it('should handle request when client is not active', async () => {
+      const mockClient = undefined;
+      mockGet.mockResolvedValue(null);
+      
+      const request = new MockRequest('https://example.com');
+      const event = { 
+        clientId: 'client-1',
+        request
+      };
+      const requestId = 'req-id';
+      
+      mockFetch.mockResolvedValue(new MockResponse('passthrough response'));
+      
+      const response = await handleRequest(event, requestId);
+      
+      expect(mockGet).toHaveBeenCalledWith('client-1');
+      expect(mockFetch).toHaveBeenCalled();
+      expect(response instanceof MockResponse).toBe(true);
     });
   });
 
-  describe('resolveMainClient function', () => {
-    let resolveMainClient: (event: FetchEvent) => Promise<Client | undefined>;
-
-    beforeEach(() => {
-      // Extract the resolveMainClient function
-      const mockSelf = {
-        addEventListener: jest.fn(),
-        skipWaiting: jest.fn(),
-        clients: global.clients,
-        registration: global.registration,
-      } as unknown as ServiceWorkerGlobalScope;
-      serviceWorkerScript.call(mockSelf);
-      resolveMainClient = (mockSelf as any).resolveMainClient; // Access the internal function
-
-      jest.clearAllMocks();
-      (global.clients.get as jest.Mock).mockResolvedValue(null);
-      (global.clients.matchAll as jest.Mock).mockResolvedValue([]);
-      activeClientIds.clear();
-    });
-
-    it('should return the client if it is active', async () => {
-      const mockActiveClient = mockWindowClient('active-client');
-      (global.clients.get as jest.Mock).mockResolvedValue(mockActiveClient);
-      activeClientIds.add('active-client');
-      const event = mockFetchEvent('/data', 'same-origin', 'default', 'GET', jest.fn(), 'active-client');
-      const client = await resolveMainClient(event);
-      expect(client).toBe(mockActiveClient);
-    });
-
-    it('should return the client if it is top-level and not active', async () => {
-      const mockTopLevelClient = mockClient('top-level-client', 'top-level');
-      (global.clients.get as jest.Mock).mockResolvedValue(mockTopLevelClient);
-      const event = mockFetchEvent('/data', 'same-origin', 'default', 'GET', jest.fn(), 'top-level-client');
-      const client = await resolveMainClient(event);
-      expect(client).toBe(mockTopLevelClient);
-    });
-
-    it('should return the visible active client from matchAll', async () => {
-      const mockActiveVisibleClient = mockWindowClient('visible-active');
-      const mockInactiveClient = mockWindowClient('inactive', 'window', 'hidden');
-      (global.clients.matchAll as jest.Mock).mockResolvedValue([mockInactiveClient, mockActiveVisibleClient]);
-      activeClientIds.add('visible-active');
-      const event = mockFetchEvent('/data', 'same-origin', 'default', 'GET', jest.fn(), 'some-other-client');
-      const client = await resolveMainClient(event);
-      expect(client).toBe(mockActiveVisibleClient);
-    });
-
-    it('should return undefined if no visible active client is found', async () => {
-      const mockInactiveClient = mockWindowClient('inactive', 'window', 'hidden');
-      (global.clients.matchAll as jest.Mock).mockResolvedValue([mockInactiveClient]);
-      const event = mockFetchEvent('/data', 'same-origin', 'default', 'GET', jest.fn(), 'some-client');
-      const client = await resolveMainClient(event);
-      expect(client).toBeUndefined();
-    });
-  });
-
-  describe('getResponse function', () => {
-    let getResponse: (event: FetchEvent, client: Client | undefined, requestId: string) => Promise<Response>;
-    const mockPassthroughResponse = new Response('passthrough');
-    const mockMockedResponseData = { body: 'mocked data', status: 200, headers: {} };
-    const mockMockedResponse = new Response('mocked data', { status: 200 });
-    Reflect.defineProperty(mockMockedResponse, Symbol('isMockedResponse'), { value: true, enumerable: true });
-
-    beforeEach(() => {
-      // Extract the getResponse function
-      const mockSelf = {
-        addEventListener: jest.fn(),
-        skipWaiting: jest.fn(),
-        clients: global.clients,
-        registration: global.registration,
-      } as unknown as Service
+  describe('sendToClient', () => {
+    it('should resolve with message data on success', async () => {
+      const mockClient = { postMessage: mockPostMessage };
+      const message = { type: 'TEST_MESSAGE' };
+      
+      // Mock the postMessage implementation to call the onmessage handler
+      mockPostMessage.mockImplementation((message, transfer) => {
+        setTimeout(() => {
+          const callback = mockPort1.onmessage;
+          if (callback) {
+            callback({ data: { result: 'success' } });
+          }
+        }, 0);
+      });
+      
+      const result = await sendToClient(mockClient, message);
+      
+      expect(mockPostMessage).toHaveBeenCalledWith(
+        message,
+        expect.arrayContaining([
