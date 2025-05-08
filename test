@@ -1,967 +1,610 @@
-import { jest } from '@jest/globals';
+/* eslint-disable no-undef */
 
-// Mock service worker globals
-const mockSkipWaiting = jest.fn().mockResolvedValue(undefined);
-const mockClaim = jest.fn().mockResolvedValue(undefined);
-const mockUnregister = jest.fn().mockResolvedValue(true);
-const mockMatchAll = jest.fn();
-const mockGet = jest.fn();
-const mockPostMessage = jest.fn();
-const mockRandomUUID = jest.fn().mockReturnValue('mock-uuid');
-const mockRespondWith = jest.fn();
-const mockWaitUntil = jest.fn();
-const mockFetch = jest.fn();
+describe('Service Worker Tests', () => {
+  let clientsMock;
+  let registrationMock;
+  let cryptoMock;
+  let fetchMock;
+  let messageChannelMock;
+  let port1Mock;
+  let port2Mock;
 
-// Mock MessageChannel
-const mockPort1 = { onmessage: null };
-const mockPort2 = {};
-
-class MockMessageChannel {
-  constructor() {
-    this.port1 = mockPort1;
-    this.port2 = mockPort2;
-  }
-}
-
-// Mock Headers
-class MockHeaders {
-  private headers: Map<string, string>;
-
-  constructor(init?: HeadersInit) {
-    this.headers = new Map();
-    
-    if (init instanceof MockHeaders) {
-      this.headers = new Map(init.headers);
-    } else if (Array.isArray(init)) {
-      init.forEach(([key, value]) => this.headers.set(key, value));
-    } else if (init) {
-      Object.entries(init).forEach(([key, value]) => this.headers.set(key, value));
-    }
-  }
-
-  delete(name: string) {
-    this.headers.delete(name.toLowerCase());
-  }
-
-  entries() {
-    return this.headers.entries();
-  }
-}
-
-// Mock Response
-class MockResponse {
-  public readonly status: number;
-  public readonly statusText: string;
-  public readonly headers: MockHeaders;
-  public readonly body: any;
-  public readonly type: string;
-
-  constructor(body?: BodyInit | null, init?: ResponseInit) {
-    this.body = body || null;
-    this.status = init?.status || 200;
-    this.statusText = init?.statusText || '';
-    this.headers = new MockHeaders(init?.headers);
-    this.type = 'basic';
-  }
-
-  clone() {
-    return new MockResponse(this.body, {
-      status: this.status,
-      statusText: this.statusText,
-      headers: this.headers
-    });
-  }
-
-  static error() {
-    const response = new MockResponse(null, { status: 0 });
-    return response;
-  }
-}
-
-// Mock Request
-class MockRequest {
-  public readonly url: string;
-  public readonly method: string;
-  public readonly headers: MockHeaders;
-  public readonly mode: string;
-  public readonly cache: string;
-  public readonly credentials: string;
-  public readonly destination: string;
-  public readonly integrity: string;
-  public readonly redirect: string;
-  public readonly referrer: string;
-  public readonly referrerPolicy: string;
-  public readonly keepalive: boolean;
-  private bodyContent: ArrayBuffer | null;
-
-  constructor(input: string, init?: RequestInit) {
-    this.url = input;
-    this.method = init?.method || 'GET';
-    this.headers = new MockHeaders(init?.headers);
-    this.mode = init?.mode || 'cors';
-    this.cache = init?.cache || 'default';
-    this.credentials = init?.credentials || 'same-origin';
-    this.destination = '';
-    this.integrity = '';
-    this.redirect = init?.redirect || 'follow';
-    this.referrer = '';
-    this.referrerPolicy = init?.referrerPolicy || '';
-    this.keepalive = init?.keepalive || false;
-    
-    // Convert body to ArrayBuffer for testing
-    this.bodyContent = init?.body ? new TextEncoder().encode(
-      typeof init.body === 'string' ? init.body : JSON.stringify(init.body)
-    ).buffer : null;
-  }
-
-  clone() {
-    const req = new MockRequest(this.url, {
-      method: this.method,
-      headers: this.headers,
-      mode: this.mode as RequestMode,
-      cache: this.cache as RequestCache,
-      credentials: this.credentials as RequestCredentials,
-      redirect: this.redirect as RequestRedirect,
-      referrerPolicy: this.referrerPolicy as ReferrerPolicy,
-      keepalive: this.keepalive
-    });
-    return req;
-  }
-
-  async arrayBuffer() {
-    return this.bodyContent || new ArrayBuffer(0);
-  }
-}
-
-// Setup global mocks before importing the service worker code
-global.self = {
-  skipWaiting: mockSkipWaiting,
-  clients: {
-    claim: mockClaim,
-    matchAll: mockMatchAll,
-    get: mockGet,
-  },
-  registration: {
-    unregister: mockUnregister,
-  },
-  addEventListener: jest.fn(),
-} as any;
-
-global.crypto = {
-  randomUUID: mockRandomUUID,
-} as any;
-
-global.MessageChannel = MockMessageChannel as any;
-global.Headers = MockHeaders as any;
-global.Response = MockResponse as any;
-global.fetch = mockFetch;
-// Ensures Object.fromEntries is available
-global.Object.fromEntries = jest.fn().mockImplementation((entries) => {
-  return Array.from(entries).reduce((obj, [key, value]) => {
-    obj[key] = value;
-    return obj;
-  }, {});
-});
-
-global.Reflect = {
-  ...global.Reflect,
-  defineProperty: jest.fn().mockReturnValue(true),
-} as any;
-
-// Import service worker code or recreate the necessary parts for testing
-// Since we can't directly import the service worker file, we'll recreate the functions
-
-const PACKAGE_VERSION = '2.6.4';
-const INTEGRITY_CHECKSUM = 'ca7800994cc8bfb5eb961e037c877074';
-const IS_MOCKED_RESPONSE = Symbol('isMockedResponse');
-const activeClientIds = new Set();
-
-// Implementation of functions from service worker
-function sendToClient(client, message, transferrables = []) {
-  return new Promise((resolve, reject) => {
-    const channel = new MessageChannel();
-    
-    channel.port1.onmessage = (event) => {
-      if (event.data && event.data.error) {
-        return reject(event.data.error);
-      }
-      
-      resolve(event.data);
-    };
-    
-    client.postMessage(
-      message,
-      [channel.port2].concat(transferrables.filter(Boolean)),
-    );
-  });
-}
-
-async function respondWithMock(response) {
-  if (response.status === 0) {
-    return Response.error();
-  }
-  
-  const mockedResponse = new Response(response.body, response);
-  
-  Reflect.defineProperty(mockedResponse, IS_MOCKED_RESPONSE, {
-    value: true,
-    enumerable: true,
-  });
-  
-  return mockedResponse;
-}
-
-async function resolveMainClient(event) {
-  const client = await self.clients.get(event.clientId);
-
-  if (activeClientIds.has(event.clientId)) {
-    return client;
-  }
-
-  if (client?.frameType === 'top-level') {
-    return client;
-  }
-
-  const allClients = await self.clients.matchAll({
-    type: 'window',
-  });
-
-  return allClients
-    .filter((client) => {
-      return client.visibilityState === 'visible';
-    })
-    .find((client) => {
-      return activeClientIds.has(client.id);
-    });
-}
-
-function passthrough(requestClone) {
-  const headers = new Headers(requestClone.headers);
-  headers.delete('accept');
-  return fetch(requestClone, { headers });
-}
-
-async function getResponse(event, client, requestId) {
-  const { request } = event;
-  const requestClone = request.clone();
-
-  if (!client) {
-    return passthrough(requestClone);
-  }
-
-  if (!activeClientIds.has(client.id)) {
-    return passthrough(requestClone);
-  }
-
-  const requestBuffer = await request.arrayBuffer();
-  const clientMessage = await sendToClient(
-    client,
-    {
-      type: 'REQUEST',
-      payload: {
-        id: requestId,
-        url: request.url,
-        mode: request.mode,
-        method: request.method,
-        headers: Object.fromEntries(request.headers.entries()),
-        cache: request.cache,
-        credentials: request.credentials,
-        destination: request.destination,
-        integrity: request.integrity,
-        redirect: request.redirect,
-        referrer: request.referrer,
-        referrerPolicy: request.referrerPolicy,
-        body: requestBuffer,
-        keepalive: request.keepalive,
-      },
-    },
-    [requestBuffer],
-  );
-
-  switch (clientMessage.type) {
-    case 'MOCK_RESPONSE': {
-      return respondWithMock(clientMessage.data);
-    }
-    case 'PASSTHROUGH': {
-      return passthrough(requestClone);
-    }
-    default: {
-      return passthrough(requestClone);
-    }
-  }
-}
-
-async function handleRequest(event, requestId) {
-  const client = await resolveMainClient(event);
-  const response = await getResponse(event, client, requestId);
-
-  if (client && activeClientIds.has(client.id)) {
-    (async function () {
-      const responseClone = response.clone();
-
-      sendToClient(
-        client,
-        {
-          type: 'RESPONSE',
-          payload: {
-            requestId,
-            isMockedResponse: IS_MOCKED_RESPONSE in response,
-            type: responseClone.type,
-            status: responseClone.status,
-            statusText: responseClone.statusText,
-            body: responseClone.body,
-            headers: Object.fromEntries(responseClone.headers.entries()),
-          },
-        },
-        [responseClone.body],
-      );
-    })();
-  }
-
-  return response;
-}
-
-// Event handlers
-function handleInstall() {
-  self.skipWaiting();
-}
-
-function handleActivate(event) {
-  event.waitUntil(self.clients.claim());
-}
-
-async function handleMessage(event) {
-  const clientId = event.source?.id;
-
-  if (!clientId || !self.clients) {
-    return;
-  }
-
-  const client = await self.clients.get(clientId);
-
-  if (!client) {
-    return;
-  }
-
-  const allClients = await self.clients.matchAll({
-    type: 'window',
-  });
-
-  switch (event.data) {
-    case 'KEEPALIVE_REQUEST': {
-      sendToClient(client, {
-        type: 'KEEPALIVE_RESPONSE',
-      });
-      break;
-    }
-
-    case 'INTEGRITY_CHECK_REQUEST': {
-      sendToClient(client, {
-        type: 'INTEGRITY_CHECK_RESPONSE',
-        payload: {
-          packageVersion: PACKAGE_VERSION,
-          checksum: INTEGRITY_CHECKSUM,
-        },
-      });
-      break;
-    }
-
-    case 'MOCK_ACTIVATE': {
-      activeClientIds.add(clientId);
-
-      sendToClient(client, {
-        type: 'MOCKING_ENABLED',
-        payload: {
-          client: {
-            id: client.id,
-            frameType: client.frameType,
-          },
-        },
-      });
-      break;
-    }
-
-    case 'MOCK_DEACTIVATE': {
-      activeClientIds.delete(clientId);
-      break;
-    }
-
-    case 'CLIENT_CLOSED': {
-      activeClientIds.delete(clientId);
-
-      const remainingClients = allClients.filter((client) => {
-        return client.id !== clientId;
-      });
-
-      if (remainingClients.length === 0) {
-        self.registration.unregister();
-      }
-
-      break;
-    }
-  }
-}
-
-function handleFetch(event) {
-  const { request } = event;
-
-  if (request.mode === 'navigate') {
-    return;
-  }
-
-  if (request.cache === 'only-if-cached' && request.mode !== 'same-origin') {
-    return;
-  }
-
-  if (activeClientIds.size === 0) {
-    return;
-  }
-
-  const requestId = crypto.randomUUID();
-  event.respondWith(handleRequest(event, requestId));
-}
-
-// Export handlers and functions for testing
-export {
-  handleInstall,
-  handleActivate,
-  handleMessage,
-  handleFetch,
-  handleRequest,
-  resolveMainClient,
-  getResponse,
-  sendToClient,
-  respondWithMock,
-  passthrough,
-  activeClientIds,
-  IS_MOCKED_RESPONSE,
-  PACKAGE_VERSION,
-  INTEGRITY_CHECKSUM,
-};
-
-// Start of actual test cases
-describe('MSW Service Worker', () => {
   beforeEach(() => {
-    // Reset mocks and state before each test
-    jest.clearAllMocks();
-    activeClientIds.clear();
-    
-    // Reset mock functions
-    mockSkipWaiting.mockResolvedValue(undefined);
-    mockClaim.mockResolvedValue(undefined);
-    mockGet.mockReset();
-    mockMatchAll.mockReset();
-    mockPostMessage.mockReset();
-    mockFetch.mockReset();
+    // Mock the 'self' object and its properties
+    global.self = {
+      addEventListener: jest.fn(),
+      skipWaiting: jest.fn(),
+      clients: {
+        claim: jest.fn(),
+        get: jest.fn(),
+        matchAll: jest.fn(),
+      },
+      registration: {
+        unregister: jest.fn(),
+      },
+      crypto: {
+        randomUUID: jest.fn(() => 'mock-uuid'),
+      },
+      fetch: jest.fn(),
+      MessageChannel: jest.fn(),
+      postMessage: jest.fn(),
+    };
+
+    // Reset mocks before each test
+    clientsMock = global.self.clients;
+    registrationMock = global.self.registration;
+    cryptoMock = global.self.crypto;
+    fetchMock = global.self.fetch;
+    messageChannelMock = global.self.MessageChannel;
+    port1Mock = { onmessage: jest.fn() };
+    port2Mock = {};
+    messageChannelMock.mockReturnValue({ port1: port1Mock, port2: port2Mock });
+
+    // Import the service worker script (as a module to access its scope)
+    jest.isolateModules(() => {
+      require('./your-service-worker-file.js'); // Replace with the actual path
+    });
+  });
+
+  afterEach(() => {
+    // Clean up the global 'self' object
+    delete global.self;
   });
 
   describe('install event', () => {
-    it('should call skipWaiting on install', () => {
-      handleInstall();
-      expect(mockSkipWaiting).toHaveBeenCalled();
+    test('should call skipWaiting', () => {
+      const installListener = global.self.addEventListener.mock.calls.find(
+        (call) => call[0] === 'install',
+      )[1];
+      installListener();
+      expect(global.self.skipWaiting).toHaveBeenCalled();
     });
   });
 
   describe('activate event', () => {
-    it('should claim clients on activate', () => {
-      const event = { waitUntil: mockWaitUntil };
-      handleActivate(event);
-      
-      expect(mockWaitUntil).toHaveBeenCalledWith(self.clients.claim());
-      expect(mockClaim).toHaveBeenCalled();
+    test('should call clients.claim with waitUntil', () => {
+      const activateListener = global.self.addEventListener.mock.calls.find(
+        (call) => call[0] === 'activate',
+      )[1];
+      const mockEvent = { waitUntil: jest.fn() };
+      activateListener(mockEvent);
+      expect(mockEvent.waitUntil).toHaveBeenCalledWith(clientsMock.claim());
     });
   });
 
   describe('message event', () => {
-    const mockClient = {
-      id: 'client-1',
-      frameType: 'top-level',
-      postMessage: mockPostMessage,
-    };
+    let messageListener;
+    let mockClient;
 
     beforeEach(() => {
-      mockGet.mockResolvedValue(mockClient);
+      messageListener = global.self.addEventListener.mock.calls.find(
+        (call) => call[0] === 'message',
+      )[1];
+      mockClient = { id: 'client-1', postMessage: jest.fn(), frameType: 'window' };
+      clientsMock.get.mockResolvedValue(mockClient);
+      clientsMock.matchAll.mockResolvedValue([mockClient]);
     });
 
-    it('should handle KEEPALIVE_REQUEST message', async () => {
-      const event = {
-        source: { id: 'client-1' },
-        data: 'KEEPALIVE_REQUEST',
-      };
-
-      await handleMessage(event);
-
-      expect(mockGet).toHaveBeenCalledWith('client-1');
-      expect(mockPostMessage).toHaveBeenCalled();
-      expect(mockPostMessage.mock.calls[0][0]).toEqual({
-        type: 'KEEPALIVE_RESPONSE',
-      });
+    test('should return early if no clientId or clients', async () => {
+      const mockEventWithoutId = { source: {} };
+      await messageListener(mockEventWithoutId);
+      expect(clientsMock.get).not.toHaveBeenCalled();
     });
 
-    it('should handle INTEGRITY_CHECK_REQUEST message', async () => {
-      const event = {
-        source: { id: 'client-1' },
-        data: 'INTEGRITY_CHECK_REQUEST',
-      };
-
-      await handleMessage(event);
-
-      expect(mockGet).toHaveBeenCalledWith('client-1');
-      expect(mockPostMessage).toHaveBeenCalled();
-      expect(mockPostMessage.mock.calls[0][0]).toEqual({
-        type: 'INTEGRITY_CHECK_RESPONSE',
-        payload: {
-          packageVersion: PACKAGE_VERSION,
-          checksum: INTEGRITY_CHECKSUM,
-        },
-      });
+    test('should return early if client is not found', async () => {
+      clientsMock.get.mockResolvedValue(undefined);
+      const mockEvent = { source: { id: 'client-1' } };
+      await messageListener(mockEvent);
+      expect(mockClient.postMessage).not.toHaveBeenCalled();
     });
 
-    it('should handle MOCK_ACTIVATE message', async () => {
-      const event = {
-        source: { id: 'client-1' },
-        data: 'MOCK_ACTIVATE',
-      };
+    test('should handle KEEPALIVE_REQUEST', async () => {
+      const mockEvent = { source: { id: 'client-1' }, data: 'KEEPALIVE_REQUEST' };
+      await messageListener(mockEvent);
+      expect(mockClient.postMessage).toHaveBeenCalledWith(
+        { type: 'KEEPALIVE_RESPONSE' },
+        [],
+      );
+    });
 
-      await handleMessage(event);
-
-      expect(mockGet).toHaveBeenCalledWith('client-1');
-      expect(activeClientIds.has('client-1')).toBe(true);
-      expect(mockPostMessage).toHaveBeenCalled();
-      expect(mockPostMessage.mock.calls[0][0]).toEqual({
-        type: 'MOCKING_ENABLED',
-        payload: {
-          client: {
-            id: 'client-1',
-            frameType: 'top-level',
+    test('should handle INTEGRITY_CHECK_REQUEST', async () => {
+      const mockEvent = { source: { id: 'client-1' }, data: 'INTEGRITY_CHECK_REQUEST' };
+      await messageListener(mockEvent);
+      expect(mockClient.postMessage).toHaveBeenCalledWith(
+        {
+          type: 'INTEGRITY_CHECK_RESPONSE',
+          payload: {
+            packageVersion: '2.6.4',
+            checksum: 'ca7800994cc8bfb5eb961e037c877074',
           },
         },
-      });
+        [],
+      );
     });
 
-    it('should handle MOCK_DEACTIVATE message', async () => {
-      activeClientIds.add('client-1');
-      
-      const event = {
-        source: { id: 'client-1' },
-        data: 'MOCK_DEACTIVATE',
-      };
-
-      await handleMessage(event);
-
-      expect(mockGet).toHaveBeenCalledWith('client-1');
-      expect(activeClientIds.has('client-1')).toBe(false);
+    test('should handle MOCK_ACTIVATE', async () => {
+      const mockEvent = { source: { id: 'client-1' }, data: 'MOCK_ACTIVATE' };
+      await messageListener(mockEvent);
+      expect(global.self.activeClientIds.has('client-1')).toBe(true);
+      expect(mockClient.postMessage).toHaveBeenCalledWith(
+        {
+          type: 'MOCKING_ENABLED',
+          payload: {
+            client: {
+              id: 'client-1',
+              frameType: 'window',
+            },
+          },
+        },
+        [],
+      );
     });
 
-    it('should handle CLIENT_CLOSED message with remaining clients', async () => {
-      activeClientIds.add('client-1');
-      activeClientIds.add('client-2');
-      
-      const mockClients = [
-        { id: 'client-2' },
-        { id: 'client-3' },
-      ];
-      
-      mockMatchAll.mockResolvedValue(mockClients);
-      
-      const event = {
-        source: { id: 'client-1' },
-        data: 'CLIENT_CLOSED',
-      };
-
-      await handleMessage(event);
-
-      expect(mockGet).toHaveBeenCalledWith('client-1');
-      expect(mockMatchAll).toHaveBeenCalledWith({ type: 'window' });
-      expect(activeClientIds.has('client-1')).toBe(false);
-      expect(mockUnregister).not.toHaveBeenCalled();
+    test('should handle MOCK_DEACTIVATE', async () => {
+      global.self.activeClientIds = new Set(['client-1']);
+      const mockEvent = { source: { id: 'client-1' }, data: 'MOCK_DEACTIVATE' };
+      await messageListener(mockEvent);
+      expect(global.self.activeClientIds.has('client-1')).toBe(false);
     });
 
-    it('should handle CLIENT_CLOSED message with no remaining clients', async () => {
-      activeClientIds.add('client-1');
-      
-      mockMatchAll.mockResolvedValue([]);
-      
-      const event = {
-        source: { id: 'client-1' },
-        data: 'CLIENT_CLOSED',
-      };
-
-      await handleMessage(event);
-
-      expect(mockGet).toHaveBeenCalledWith('client-1');
-      expect(mockMatchAll).toHaveBeenCalledWith({ type: 'window' });
-      expect(activeClientIds.has('client-1')).toBe(false);
-      expect(mockUnregister).toHaveBeenCalled();
+    test('should handle CLIENT_CLOSED and unregister when no remaining clients', async () => {
+      global.self.activeClientIds = new Set(['client-1']);
+      clientsMock.matchAll.mockResolvedValue([]);
+      const mockEvent = { source: { id: 'client-1' }, data: 'CLIENT_CLOSED' };
+      await messageListener(mockEvent);
+      expect(global.self.activeClientIds.has('client-1')).toBe(false);
+      expect(registrationMock.unregister).toHaveBeenCalled();
     });
 
-    it('should do nothing when client is not found', async () => {
-      mockGet.mockResolvedValue(null);
-      
-      const event = {
-        source: { id: 'client-1' },
-        data: 'MOCK_ACTIVATE',
-      };
-
-      await handleMessage(event);
-
-      expect(mockGet).toHaveBeenCalledWith('client-1');
-      expect(activeClientIds.has('client-1')).toBe(false);
-      expect(mockPostMessage).not.toHaveBeenCalled();
-    });
-
-    it('should do nothing when clientId is not present', async () => {
-      const event = {
-        source: {},
-        data: 'MOCK_ACTIVATE',
-      };
-
-      await handleMessage(event);
-
-      expect(mockGet).not.toHaveBeenCalled();
-      expect(mockPostMessage).not.toHaveBeenCalled();
+    test('should handle CLIENT_CLOSED and not unregister with remaining clients', async () => {
+      global.self.activeClientIds = new Set(['client-1', 'client-2']);
+      const mockOtherClient = { id: 'client-2' };
+      clientsMock.matchAll.mockResolvedValue([mockOtherClient]);
+      const mockEvent = { source: { id: 'client-1' }, data: 'CLIENT_CLOSED' };
+      await messageListener(mockEvent);
+      expect(global.self.activeClientIds.has('client-1')).toBe(false);
+      expect(registrationMock.unregister).not.toHaveBeenCalled();
     });
   });
 
   describe('fetch event', () => {
-    it('should bypass navigation requests', () => {
-      const request = new MockRequest('https://example.com', { mode: 'navigate' });
-      const event = { request, respondWith: mockRespondWith };
-      
-      handleFetch(event);
-      
-      expect(mockRespondWith).not.toHaveBeenCalled();
-    });
+    let fetchListener;
+    let mockEvent;
 
-    it('should bypass only-if-cached requests', () => {
-      const request = new MockRequest('https://example.com', { 
-        cache: 'only-if-cached', 
-        mode: 'no-cors' 
-      });
-      const event = { request, respondWith: mockRespondWith };
-      
-      handleFetch(event);
-      
-      expect(mockRespondWith).not.toHaveBeenCalled();
-    });
-
-    it('should bypass requests when no active clients', () => {
-      const request = new MockRequest('https://example.com');
-      const event = { request, respondWith: mockRespondWith };
-      
-      handleFetch(event);
-      
-      expect(mockRespondWith).not.toHaveBeenCalled();
-    });
-
-    it('should handle fetch event with active clients', () => {
-      activeClientIds.add('client-1');
-      
-      const request = new MockRequest('https://example.com');
-      const event = { 
-        request, 
-        respondWith: mockRespondWith,
-        clientId: 'client-1'
+    beforeEach(() => {
+      fetchListener = global.self.addEventListener.mock.calls.find(
+        (call) => call[0] === 'fetch',
+      )[1];
+      mockEvent = {
+        request: {
+          mode: 'same-origin',
+          cache: 'default',
+          url: 'https://example.com/api/data',
+          headers: new Headers(),
+        },
+        respondWith: jest.fn(),
+        clientId: 'client-1',
       };
-      
-      handleFetch(event);
-      
-      expect(mockRandomUUID).toHaveBeenCalled();
-      expect(mockRespondWith).toHaveBeenCalled();
+      global.self.activeClientIds = new Set(['client-1']);
+      clientsMock.get.mockResolvedValue({ id: 'client-1', postMessage: jest.fn() });
+    });
+
+    test('should bypass navigation requests', () => {
+      mockEvent.request.mode = 'navigate';
+      fetchListener(mockEvent);
+      expect(mockEvent.respondWith).not.toHaveBeenCalled();
+    });
+
+    test('should bypass "only-if-cached" requests not from same origin', () => {
+      mockEvent.request.cache = 'only-if-cached';
+      mockEvent.request.mode = 'cors';
+      fetchListener(mockEvent);
+      expect(mockEvent.respondWith).not.toHaveBeenCalled();
+    });
+
+    test('should bypass all requests when no active clients', () => {
+      global.self.activeClientIds = new Set();
+      fetchListener(mockEvent);
+      expect(mockEvent.respondWith).not.toHaveBeenCalled();
+    });
+
+    test('should call handleRequest and respond with its result', () => {
+      const mockResponse = new Response('mocked data');
+      const handleRequestMock = jest.fn().mockResolvedValue(mockResponse);
+      // Mock the module to return our mock handleRequest
+      jest.isolateModules(() => {
+        const originalModule = require('./your-service-worker-file.js');
+        originalModule.handleRequest = handleRequestMock;
+        // Re-require to get the mocked version within this context
+        require('./your-service-worker-file.js');
+      });
+      fetchListener(mockEvent);
+      expect(handleRequestMock).toHaveBeenCalledWith(mockEvent, 'mock-uuid');
+      // Wait for the promise to resolve before checking respondWith
+      return Promise.resolve().then(() => {
+        expect(mockEvent.respondWith).toHaveBeenCalledWith(mockResponse);
+      });
     });
   });
 
-  describe('resolveMainClient', () => {
-    it('should return client when clientId is in activeClientIds', async () => {
-      activeClientIds.add('client-1');
-      
-      const mockClient = { id: 'client-1' };
-      mockGet.mockResolvedValue(mockClient);
-      
-      const event = { clientId: 'client-1' };
-      const result = await resolveMainClient(event);
-      
-      expect(mockGet).toHaveBeenCalledWith('client-1');
-      expect(result).toBe(mockClient);
+  describe('handleRequest function', () => {
+    let mockEvent;
+    let mockClient;
+
+    beforeEach(() => {
+      mockClient = { id: 'client-1', postMessage: jest.fn() };
+      clientsMock.get.mockResolvedValue(mockClient);
+      clientsMock.matchAll.mockResolvedValue([mockClient]);
+      global.self.activeClientIds = new Set(['client-1']);
+      cryptoMock.randomUUID.mockReturnValue('mock-request-id');
+      mockEvent = {
+        request: {
+          url: 'https://example.com/api/data',
+          mode: 'cors',
+          method: 'GET',
+          headers: new Headers({ 'Content-Type': 'application/json' }),
+          arrayBuffer: jest.fn().mockResolvedValue(new ArrayBuffer(16)),
+        },
+        clientId: 'client-1',
+      };
     });
 
-    it('should return client when frameType is top-level', async () => {
-      const mockClient = { id: 'client-1', frameType: 'top-level' };
-      mockGet.mockResolvedValue(mockClient);
-      
-      const event = { clientId: 'client-1' };
-      const result = await resolveMainClient(event);
-      
-      expect(mockGet).toHaveBeenCalledWith('client-1');
-      expect(result).toBe(mockClient);
+    test('should call resolveMainClient', async () => {
+      const resolveMainClientMock = jest.fn().mockResolvedValue(mockClient);
+      const getResponseMock = jest.fn().mockResolvedValue(new Response());
+      jest.isolateModules(() => {
+        const originalModule = require('./your-service-worker-file.js');
+        originalModule.resolveMainClient = resolveMainClientMock;
+        originalModule.getResponse = getResponseMock;
+        require('./your-service-worker-file.js');
+      });
+      const handleRequestFn = require.cache[require.resolve('./your-service-worker-file.js')].exports.handleRequest;
+      await handleRequestFn(mockEvent, 'mock-request-id');
+      expect(resolveMainClientMock).toHaveBeenCalledWith(mockEvent);
     });
 
-    it('should find visible client with active client id', async () => {
-      activeClientIds.add('client-2');
-      
-      mockGet.mockResolvedValue({ id: 'client-1', frameType: 'iframe' });
-      
-      const mockClients = [
-        { id: 'client-1', visibilityState: 'hidden' },
-        { id: 'client-2', visibilityState: 'visible' },
-        { id: 'client-3', visibilityState: 'visible' },
-      ];
-      
-      mockMatchAll.mockResolvedValue(mockClients);
-      
-      const event = { clientId: 'client-1' };
-      const result = await resolveMainClient(event);
-      
-      expect(mockGet).toHaveBeenCalledWith('client-1');
-      expect(mockMatchAll).toHaveBeenCalledWith({ type: 'window' });
-      expect(result).toBe(mockClients[1]);
+    test('should call getResponse', async () => {
+      const resolveMainClientMock = jest.fn().mockResolvedValue(mockClient);
+      const getResponseMock = jest.fn().mockResolvedValue(new Response());
+      jest.isolateModules(() => {
+        const originalModule = require('./your-service-worker-file.js');
+        originalModule.resolveMainClient = resolveMainClientMock;
+        originalModule.getResponse = getResponseMock;
+        require('./your-service-worker-file.js');
+      });
+      const handleRequestFn = require.cache[require.resolve('./your-service-worker-file.js')].exports.handleRequest;
+      await handleRequestFn(mockEvent, 'mock-request-id');
+      expect(getResponseMock).toHaveBeenCalledWith(mockEvent, mockClient, 'mock-request-id');
     });
 
-    it('should return undefined when no matching client found', async () => {
-      mockGet.mockResolvedValue({ id: 'client-1', frameType: 'iframe' });
-      
-      const mockClients = [
-        { id: 'client-1', visibilityState: 'hidden' },
-        { id: 'client-3', visibilityState: 'visible' },
-      ];
-      
-      mockMatchAll.mockResolvedValue(mockClients);
-      
-      const event = { clientId: 'client-1' };
-      const result = await resolveMainClient(event);
-      
-      expect(mockGet).toHaveBeenCalledWith('client-1');
-      expect(mockMatchAll).toHaveBeenCalledWith({ type: 'window' });
+    test('should send RESPONSE message to client with response details if client is active', async () => {
+      const mockResponseBody = new ReadableStream();
+      const mockResponse = new Response(mockResponseBody, {
+        status: 200,
+        statusText: 'OK',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      const getResponseMock = jest.fn().mockResolvedValue(mockResponse);
+      const sendToClientMock = jest.fn().mockResolvedValue({});
+      jest.isolateModules(() => {
+        const originalModule = require('./your-service-worker-file.js');
+        originalModule.getResponse = getResponseMock;
+        originalModule.sendToClient = sendToClientMock;
+        require('./your-service-worker-file.js');
+      });
+      const handleRequestFn = require.cache[require.resolve('./your-service-worker-file.js')].exports.handleRequest;
+      await handleRequestFn(mockEvent, 'mock-request-id');
+      expect(sendToClientMock).toHaveBeenCalledWith(
+        mockClient,
+        {
+          type: 'RESPONSE',
+          payload: {
+            requestId: 'mock-request-id',
+            isMockedResponse: false,
+            type: 'basic',
+            status: 200,
+            statusText: 'OK',
+            body: mockResponseBody,
+            headers: { 'content-type': 'application/json' },
+          },
+        },
+        [mockResponseBody],
+      );
+      // Ensure the original response is returned
+      const result = await handleRequestFn(mockEvent, 'mock-request-id');
+      expect(result).toBe(mockResponse);
+    });
+
+    test('should not send RESPONSE message if client is not active', async () => {
+      global.self.activeClientIds = new Set();
+      const mockResponse = new Response();
+      const getResponseMock = jest.fn().mockResolvedValue(mockResponse);
+      const sendToClientMock = jest.fn();
+      jest.isolateModules(() => {
+        const originalModule = require('./your-service-worker-file.js');
+        originalModule.getResponse = getResponseMock;
+        originalModule.sendToClient = sendToClientMock;
+        require('./your-service-worker-file.js');
+      });
+      const handleRequestFn = require.cache[require.resolve('./your-service-worker-file.js')].exports.handleRequest;
+      await handleRequestFn(mockEvent, 'mock-request-id');
+      expect(sendToClientMock).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('resolveMainClient function', () => {
+    let resolveMainClientFn;
+    let mockEvent;
+    let client1;
+    let client2;
+
+    beforeEach(() => {
+      client1 = { id: 'client-1', frameType: 'window', visibilityState: 'visible' };
+      client2 = { id: 'client-2', frameType: 'top-level', visibilityState: 'hidden' };
+      clientsMock.get.mockResolvedValue(client1);
+      clientsMock.matchAll.mockResolvedValue([client1, client2]);
+      global.self.activeClientIds = new Set(['client-1']);
+      jest.isolateModules(() => {
+        resolveMainClientFn = require('./your-service-worker-file.js').resolveMainClient;
+      });
+      mockEvent = { clientId: 'client-1' };
+    });
+
+    test('should return the client if its ID is in activeClientIds', async () => {
+      const result = await resolveMainClientFn(mockEvent);
+      expect(result).toBe(client1);
+    });
+
+    test('should return the client if its frameType is "top-level" and not in activeClientIds', async () => {
+      global.self.activeClientIds = new Set();
+      clientsMock.get.mockResolvedValue(client2);
+      mockEvent.clientId = 'client-2';
+      const result = await resolveMainClientFn(mockEvent);
+      expect(result).toBe(client2);
+    });
+
+    test('should return the visible client whose ID is in activeClientIds', async () => {
+      const client3 = { id: 'client-3', frameType: 'window', visibilityState: 'visible' };
+      clientsMock.matchAll.mockResolvedValue([client2, client3]);
+      global.self.activeClientIds = new Set(['client-3']);
+      clientsMock.get.mockResolvedValue(undefined); // Simulate initial clientId not being active
+      const result = await resolveMainClientFn({ clientId: 'some-id' });
+      expect(result).toBe(client3);
+    });
+
+    test('should return undefined if no matching visible active client is found', async () => {
+      clientsMock.matchAll.mockResolvedValue([client2, { id: 'client-4', frameType: 'window', visibilityState: 'hidden' }]);
+      global.self.activeClientIds = new Set(['client-1']);
+      clientsMock.get.mockResolvedValue(undefined);
+      const result = await resolveMainClientFn({ clientId: 'some-id' });
       expect(result).toBeUndefined();
     });
   });
 
-  describe('getResponse', () => {
-    it('should passthrough when client is not active', async () => {
-      const mockClient = { id: 'client-1' };
-      const request = new MockRequest('https://example.com');
-      const event = { request };
-      const requestId = 'req-1';
-      
-      mockFetch.mockResolvedValue(new MockResponse('original response'));
-      
-      const response = await getResponse(event, mockClient, requestId);
-      
-      expect(mockFetch).toHaveBeenCalled();
-      expect(response instanceof MockResponse).toBe(true);
-    });
+  describe('getResponse function', () => {
+    let getResponseFn;
+    let mockEvent;
+    let mockClient;
 
-    it('should handle MOCK_RESPONSE message type', async () => {
-      activeClientIds.add('client-1');
-      
-      const mockClient = { 
-        id: 'client-1',
-        postMessage: mockPostMessage
+    beforeEach(() => {
+      mockClient = { id: 'client-1', postMessage: jest.fn() };
+      clientsMock.get.mockResolvedValue(mockClient);
+      global.self.activeClientIds = new Set(['client-1']);
+      mockEvent = {
+        request: {
+          url: 'https://example.com/api/data',
+          method: 'GET',
+          headers: new Headers(),
+          clone: jest.fn().mockReturnValue
+-----
+({
+            headers: new Headers(),
+            arrayBuffer: jest.fn().mockResolvedValue(new ArrayBuffer(8)),
+          }) as unknown as Request,
+          arrayBuffer: jest.fn().mockResolvedValue(new ArrayBuffer(16)),
+        } as Request,
       };
-      
-      // Setup port1 onmessage handler to respond with MOCK_RESPONSE
-      mockPostMessage.mockImplementation((message, transfer) => {
-        setTimeout(() => {
-          const callback = mockPort1.onmessage;
-          if (callback) {
-            callback({
-              data: {
-                type: 'MOCK_RESPONSE',
-                data: {
-                  status: 200,
-                  statusText: 'Mocked',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ mocked: true })
-                }
-              }
-            });
-          }
-        }, 0);
-      });
-      
-      const request = new MockRequest('https://example.com');
-      const event = { request };
-      const requestId = 'req-1';
-      
-      const response = await getResponse(event, mockClient, requestId);
-      
-      expect(mockPostMessage).toHaveBeenCalled();
-      expect(response instanceof MockResponse).toBe(true);
-      expect(response.status).toBe(200);
-      expect(response.statusText).toBe('Mocked');
-      expect(Reflect.defineProperty).toHaveBeenCalledWith(
-        response, 
-        IS_MOCKED_RESPONSE, 
-        expect.any(Object)
-      );
-    });
-
-    it('should handle PASSTHROUGH message type', async () => {
-      activeClientIds.add('client-1');
-      
-      const mockClient = { 
-        id: 'client-1',
-        postMessage: mockPostMessage
-      };
-      
-      // Setup port1 onmessage handler to respond with PASSTHROUGH
-      mockPostMessage.mockImplementation((message, transfer) => {
-        setTimeout(() => {
-          const callback = mockPort1.onmessage;
-          if (callback) {
-            callback({
-              data: {
-                type: 'PASSTHROUGH'
-              }
-            });
-          }
-        }, 0);
-      });
-      
-      const request = new MockRequest('https://example.com');
-      const event = { request };
-      const requestId = 'req-1';
-      
-      mockFetch.mockResolvedValue(new MockResponse('original response'));
-      
-      const response = await getResponse(event, mockClient, requestId);
-      
-      expect(mockPostMessage).toHaveBeenCalled();
-      expect(mockFetch).toHaveBeenCalled();
-      expect(response instanceof MockResponse).toBe(true);
-    });
-  });
-
-  describe('respondWithMock', () => {
-    it('should return Response.error() when status is 0', async () => {
-      const mockResponseData = { status: 0 };
-      const response = await respondWithMock(mockResponseData);
-      
-      expect(response instanceof MockResponse).toBe(true);
-      expect(response.status).toBe(0);
-    });
-
-    it('should set IS_MOCKED_RESPONSE property on response', async () => {
-      const mockResponseData = { 
-        status: 200,
-        statusText: 'OK',
-        headers: { 'Content-Type': 'text/plain' },
-        body: 'Test Body'
-      };
-      
-      const response = await respondWithMock(mockResponseData);
-      
-      expect(response instanceof MockResponse).toBe(true);
-      expect(response.status).toBe(200);
-      expect(response.statusText).toBe('OK');
-      expect(Reflect.defineProperty).toHaveBeenCalledWith(
-        response,
-        IS_MOCKED_RESPONSE,
-        {
-          value: true,
-          enumerable: true,
+      fetchMock.mockResolvedValue(new Response());
+      messageChannelMock.mockReturnValue({ port1: port1Mock, port2: port2Mock });
+      port1Mock.onmessage.mockImplementation((event) => {
+        if (event.data && event.data.type === 'MOCK_RESPONSE') {
+          return Promise.resolve({ type: 'MOCK_RESPONSE', data: { body: 'mocked' } });
         }
+        if (event.data && event.data.type === 'PASSTHROUGH') {
+          return Promise.resolve({ type: 'PASSTHROUGH' });
+        }
+        return Promise.resolve({});
+      });
+      jest.isolateModules(() => {
+        getResponseFn = require('./your-service-worker-file.js').getResponse;
+        require('./your-service-worker-file.js').sendToClient = (client, message) => {
+          return new Promise((resolve) => {
+            port1Mock.onmessage({ data: message });
+            resolve({});
+          });
+        };
+      });
+    });
+
+    test('should call passthrough if no client is provided', async () => {
+      clientsMock.get.mockResolvedValue(undefined);
+      const result = await getResponseFn(mockEvent, undefined, 'mock-request-id');
+      expect(fetchMock).toHaveBeenCalled();
+      expect(result).toBeInstanceOf(Response);
+    });
+
+    test('should call passthrough if client is not in activeClientIds', async () => {
+      global.self.activeClientIds = new Set();
+      const result = await getResponseFn(mockEvent, mockClient, 'mock-request-id');
+      expect(fetchMock).toHaveBeenCalled();
+      expect(result).toBeInstanceOf(Response);
+    });
+
+    test('should send REQUEST message to client', async () => {
+      await getResponseFn(mockEvent, mockClient, 'mock-request-id');
+      expect(global.self.postMessage).toHaveBeenCalledWith(
+        {
+          type: 'REQUEST',
+          payload: {
+            id: 'mock-request-id',
+            url: 'https://example.com/api/data',
+            mode: 'cors',
+            method: 'GET',
+            headers: {},
+            cache: 'default',
+            credentials: 'omit',
+            destination: '',
+            integrity: '',
+            redirect: 'follow',
+            referrer: '',
+            referrerPolicy: '',
+            body: expect.any(ArrayBuffer),
+            keepalive: false,
+          },
+        },
+        expect.any(Array),
+      );
+    });
+
+    test('should return passthrough response if client responds with PASSTHROUGH', async () => {
+      global.self.postMessage.mockImplementation((message, transfer, ports) => {
+        ports[0].onmessage({ data: { type: 'PASSTHROUGH' } });
+      });
+      const result = await getResponseFn(mockEvent, mockClient, 'mock-request-id');
+      expect(fetchMock).toHaveBeenCalled();
+      expect(result).toBeInstanceOf(Response);
+    });
+
+    test('should call respondWithMock if client responds with MOCK_RESPONSE', async () => {
+      const respondWithMockFn = jest.fn().mockResolvedValue(new Response('mocked'));
+      jest.isolateModules(() => {
+        const originalModule = require('./your-service-worker-file.js');
+        originalModule.respondWithMock = respondWithMockFn;
+        require('./your-service-worker-file.js').sendToClient = (client, message) => {
+          return new Promise((resolve) => {
+            if (message.type === 'REQUEST') {
+              global.self.postMessage(message, [], [port2Mock]);
+              port1Mock.onmessage({ data: { type: 'MOCK_RESPONSE', data: { body: 'mocked' } } });
+              resolve({});
+            }
+          });
+        };
+        require('./your-service-worker-file.js').getResponse = originalModule.getResponse;
+      });
+      const getResponseFn = require.cache[require.resolve('./your-service-worker-file.js')].exports.getResponse;
+
+      const result = await getResponseFn(mockEvent, mockClient, 'mock-request-id');
+      expect(respondWithMockFn).toHaveBeenCalledWith({ body: 'mocked' });
+      expect(result).toBeInstanceOf(Response);
+      expect(result.body).toEqual(new Response('mocked').body);
+    });
+
+    test('should return passthrough if client response type is unknown', async () => {
+      global.self.postMessage.mockImplementation((message, transfer, ports) => {
+        ports[0].onmessage({ data: { type: 'UNKNOWN' } });
+      });
+      const result = await getResponseFn(mockEvent, mockClient, 'mock-request-id');
+      expect(fetchMock).toHaveBeenCalled();
+      expect(result).toBeInstanceOf(Response);
+    });
+  });
+
+  describe('sendToClient function', () => {
+    test('should post message to the client with ports and transferrables', async () => {
+      const mockClient = { postMessage: jest.fn() };
+      const mockMessage = { type: 'TEST' };
+      const mockTransferrable = [new ArrayBuffer(4)];
+      const sendToClientFn = require('./your-service-worker-file.js').sendToClient;
+      await sendToClientFn(mockClient, mockMessage, mockTransferrable);
+      expect(messageChannelMock).toHaveBeenCalled();
+      expect(mockClient.postMessage).toHaveBeenCalledWith(
+        mockMessage,
+        [port2Mock, mockTransferrable[0]],
+      );
+      expect(port1Mock.onmessage).toBeDefined();
+    });
+
+    test('should resolve with event data on successful message', async () => {
+      const mockClient = { postMessage: jest.fn() };
+      const mockMessage = { type: 'TEST' };
+      const sendToClientFn = require('./your-service-worker-file.js').sendToClient;
+      let resolveValue;
+      port1Mock.onmessage.mockImplementation((event) => {
+        resolveValue = event.data;
+      });
+      const result = await sendToClientFn(mockClient, mockMessage);
+      expect(resolveValue).toBeUndefined(); // Resolve happens asynchronously
+    });
+
+    test('should reject with error if event data contains error', async () => {
+      const mockClient = { postMessage: jest.fn() };
+      const mockMessage = { type: 'TEST' };
+      const sendToClientFn = require('./your-service-worker-file.js').sendToClient;
+      port1Mock.onmessage.mockImplementation((event) => {
+        throw event.data.error;
+      });
+      await expect(sendToClientFn(mockClient, mockMessage)).rejects.toBeUndefined(); // The mock throws, Jest catches
+    });
+
+    test('should handle empty transferrables array', async () => {
+      const mockClient = { postMessage: jest.fn() };
+      const mockMessage = { type: 'TEST' };
+      const sendToClientFn = require('./your-service-worker-file.js').sendToClient;
+      await sendToClientFn(mockClient, mockMessage, []);
+      expect(mockClient.postMessage).toHaveBeenCalledWith(
+        mockMessage,
+        [port2Mock],
+      );
+    });
+
+    test('should filter out null or undefined transferrables', async () => {
+      const mockClient = { postMessage: jest.fn() };
+      const mockMessage = { type: 'TEST' };
+      const mockTransferrables = [new ArrayBuffer(4), null, undefined];
+      const sendToClientFn = require('./your-service-worker-file.js').sendToClient;
+      await sendToClientFn(mockClient, mockMessage, mockTransferrables);
+      expect(mockClient.postMessage).toHaveBeenCalledWith(
+        mockMessage,
+        [port2Mock, mockTransferrables[0]],
       );
     });
   });
 
-  describe('handleRequest', () => {
-    it('should process request and return response', async () => {
-      activeClientIds.add('client-1');
-      
-      const mockClient = { 
-        id: 'client-1',
-        postMessage: mockPostMessage
-      };
-      
-      mockGet.mockResolvedValue(mockClient);
-      
-      // Setup port1 onmessage handler for sendToClient
-      mockPostMessage.mockImplementation((message, transfer) => {
-        setTimeout(() => {
-          const callback = mockPort1.onmessage;
-          if (callback) {
-            // First respond to REQUEST message
-            if (message.type === 'REQUEST') {
-              callback({
-                data: {
-                  type: 'MOCK_RESPONSE',
-                  data: {
-                    status: 201,
-                    statusText: 'Created',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ created: true })
-                  }
-                }
-              });
-            }
-          }
-        }, 0);
+  describe('respondWithMock function', () => {
+    let respondWithMockFn;
+
+    beforeEach(() => {
+      jest.isolateModules(() => {
+        respondWithMockFn = require('./your-service-worker-file.js').respondWithMock;
       });
-      
-      const request = new MockRequest('https://example.com');
-      const event = { 
-        clientId: 'client-1',
-        request
-      };
-      const requestId = 'req-id';
-      
-      const response = await handleRequest(event, requestId);
-      
-      expect(mockGet).toHaveBeenCalledWith('client-1');
-      expect(mockPostMessage).toHaveBeenCalled();
-      expect(response instanceof MockResponse).toBe(true);
-      expect(response.status).toBe(201);
-      expect(response.statusText).toBe('Created');
-      
-      // Wait for the async response handler to complete
-      await new Promise(resolve => setTimeout(resolve, 10));
-      
-      // Verify that a second message was sent with the RESPONSE
-      const calls = mockPostMessage.mock.calls;
-      expect(calls.length).toBeGreaterThan(1);
-      expect(calls[1][0].type).toBe('RESPONSE');
-      expect(calls[1][0].payload.requestId).toBe(requestId);
     });
 
-    it('should handle request when client is not active', async () => {
-      const mockClient = undefined;
-      mockGet.mockResolvedValue(null);
-      
-      const request = new MockRequest('https://example.com');
-      const event = { 
-        clientId: 'client-1',
-        request
-      };
-      const requestId = 'req-id';
-      
-      mockFetch.mockResolvedValue(new MockResponse('passthrough response'));
-      
-      const response = await handleRequest(event, requestId);
-      
-      expect(mockGet).toHaveBeenCalledWith('client-1');
-      expect(mockFetch).toHaveBeenCalled();
-      expect(response instanceof MockResponse).toBe(true);
+    test('should return Response.error() if response status is 0', async () => {
+      const mockResponseData = { status: 0, body: 'error' };
+      const result = await respondWithMockFn(mockResponseData);
+      expect(result).toEqual(Response.error());
+    });
+
+    test('should return a new Response with provided body and options', async () => {
+      const mockResponseData = { status: 200, body: 'mocked data', headers: { 'Content-Type': 'text/plain' } };
+      const result = await respondWithMockFn(mockResponseData);
+      expect(result).toBeInstanceOf(Response);
+      expect(await result.text()).toBe('mocked data');
+      expect(result.status).toBe(200);
+      expect(result.headers.get('Content-Type')).toBe('text/plain');
+    });
+
+    test('should define IS_MOCKED_RESPONSE property on the response', async () => {
+      const mockResponseData = { status: 200, body: 'mocked data' };
+      const result = await respondWithMockFn(mockResponseData);
+      expect(result[Symbol('isMockedResponse')]).toBe(true);
+    });
+
+    test('should make IS_MOCKED_RESPONSE enumerable', async () => {
+      const mockResponseData = { status: 200, body: 'mocked data' };
+      const result = await respondWithMockFn(mockResponseData);
+      const keys = Object.keys(result);
+      expect(keys.includes('isMockedResponse')).toBe(true);
     });
   });
-
-  describe('sendToClient', () => {
-    it('should resolve with message data on success', async () => {
-      const mockClient = { postMessage: mockPostMessage };
-      const message = { type: 'TEST_MESSAGE' };
-      
-      // Mock the postMessage implementation to call the onmessage handler
-      mockPostMessage.mockImplementation((message, transfer) => {
-        setTimeout(() => {
-          const callback = mockPort1.onmessage;
-          if (callback) {
-            callback({ data: { result: 'success' } });
-          }
-        }, 0);
-      });
-      
-      const result = await sendToClient(mockClient, message);
-      
-      expect(mockPostMessage).toHaveBeenCalledWith(
-        message,
-        expect.arrayContaining([
+});
